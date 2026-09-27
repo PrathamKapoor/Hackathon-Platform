@@ -1,0 +1,47 @@
+# Dependencies
+node_modules/
+.npm/
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Runtime state: the database and uploaded files are never in version control.
+# A committed SQLite file is a committed copy of every user's password hash and
+# session digest.
+storage/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Secrets
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Generated API document. It is derived from the Zod schemas at build time and
+# checked in CI with `npm run check:openapi`, so committing it would only create
+# a second thing to keep in sync.
+openapi.json
+
+# Editor and OS noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+
+# Logs
+*.log
+npm-debug.log*
+logs/
+
+# Browser-test artefacts. `apps/api/test/browser.ts` writes a screenshot here on
+# every `npm run test:e2e` run, so it is regenerated constantly and is several
+# megabytes of PNGs. It is evidence for a debugging session, never a source file.
+test-results/
+playwright-report/

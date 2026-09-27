@@ -1,0 +1,42 @@
+{
+  "name": "verdict",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Verdict — a hackathon operating system with a defensible, reproducible judging engine.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.6.0"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace @verdict/web",
+    "dev": "node --run dev:api & node --run dev:web",
+    "dev:api": "node --watch --watch-preserve-output apps/api/src/server.ts",
+    "dev:web": "npm run dev --workspace @verdict/web",
+    "start": "node apps/api/src/server.ts",
+    "seed": "node apps/api/src/seed/run.ts",
+    "migrate": "node apps/api/src/db/migrate-cli.ts",
+    "openapi": "node scripts/generate-openapi.ts",
+    "check:openapi": "node scripts/generate-openapi.ts --check",
+    "typecheck": "tsc -p tsconfig.check.json && tsc -p apps/web/tsconfig.json",
+    "test": "node --test --test-reporter=spec \"packages/core/test/**/*.test.ts\" \"apps/api/test/*.test.ts\"",
+    "test:core": "node --test --test-reporter=spec \"packages/core/test/**/*.test.ts\"",
+    "test:api": "node --test --test-reporter=spec \"apps/api/test/*.test.ts\"",
+    "test:e2e": "npm run build && node --test --test-reporter=spec \"apps/api/test/e2e/*.test.ts\"",
+    "test:browser": "npm run test:e2e",
+    "acceptance": "node scripts/acceptance.ts",
+    "verify": "npm run typecheck && npm run test && npm run build && npm run test:e2e && npm run acceptance"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "playwright": "^1.63.0",
+    "typescript": "^5.9.2"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true
+  }
+}

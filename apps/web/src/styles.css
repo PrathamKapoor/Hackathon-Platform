@@ -1,0 +1,541 @@
+/*
+ * Verdict design system.
+ *
+ * The look is "grainient": saturated gradients under a fine film grain, so
+ * large fields of colour have some tooth instead of reading as flat plastic.
+ * The grain is an inline SVG feTurbulence used as a background image, which
+ * costs one small data URI and needs no asset pipeline or network request.
+ *
+ * Everything here is a plain custom property. There is no CSS-in-JS and no
+ * utility framework, because a self-hosted deployment should be able to restyle
+ * the whole product from one file.
+ *
+ * Contrast: body text and every interactive label meet WCAG AA on the
+ * background they sit on. Gradient washes are never used behind text — they are
+ * confined to headers, empty states and the hero, where the text on top is a
+ * solid high-contrast colour.
+ */
+
+:root {
+  /* Brand. Indigo leads because it reads as "instrument", not "toy"; the
+     green is the only accent allowed to mean "good/verified". */
+  --verdict-indigo: #5227ff;
+  --verdict-indigo-deep: #3a12cc;
+  --verdict-green: #0e9f6e;
+  --verdict-green-deep: #07714d;
+  --verdict-amber: #b45309;
+  --verdict-red: #b42318;
+  --verdict-ink: #0b0b12;
+
+  --surface-page: #fbfaf8;
+  --surface-raised: #ffffff;
+  --surface-sunken: #f2f0ec;
+  --surface-inverse: #14141c;
+
+  --text-primary: #16161d;
+  --text-secondary: #55555f;
+  --text-muted: #7a7a85;
+  --text-on-accent: #ffffff;
+
+  --border-subtle: #e6e2db;
+  --border-strong: #cfc9be;
+
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --radius-pill: 999px;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+  --space-8: 64px;
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+
+  --shadow-sm: 0 1px 2px rgb(11 11 18 / 6%), 0 1px 1px rgb(11 11 18 / 4%);
+  --shadow-md: 0 4px 16px rgb(11 11 18 / 8%), 0 1px 3px rgb(11 11 18 / 6%);
+  --shadow-lg: 0 16px 48px rgb(11 11 18 / 14%), 0 2px 8px rgb(11 11 18 / 8%);
+
+  /* The grain. feTurbulence at a high base frequency reads as film grain; the
+     opacity is kept low so it never competes with text laid over it. */
+  --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='0.42'/%3E%3C/svg%3E");
+
+  --gradient-brand: linear-gradient(135deg, var(--verdict-indigo) 0%, #7b3dff 45%, var(--verdict-green) 130%);
+  --gradient-wash: linear-gradient(180deg, rgb(82 39 255 / 10%) 0%, rgb(14 159 110 / 6%) 100%);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --surface-page: #0e0e14;
+    --surface-raised: #17171f;
+    --surface-sunken: #101017;
+    --text-primary: #f4f3f0;
+    --text-secondary: #b3b2bd;
+    --text-muted: #8a8995;
+    --border-subtle: #2a2a35;
+    --border-strong: #3d3d4a;
+    --verdict-amber: #f59e0b;
+    --verdict-red: #f87171;
+    --shadow-sm: 0 1px 2px rgb(0 0 0 / 40%);
+    --shadow-md: 0 4px 16px rgb(0 0 0 / 45%);
+    --shadow-lg: 0 16px 48px rgb(0 0 0 / 55%);
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.55;
+  color: var(--text-primary);
+  background-color: var(--surface-page);
+  /* The grain sits on the page itself rather than on a wrapper, so it covers
+     overscroll too and there is nothing to forget to apply. */
+  background-image: var(--grain);
+  background-blend-mode: overlay;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  margin: 0;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+  font-weight: 640;
+}
+
+h1 { font-size: 30px; }
+h2 { font-size: 22px; }
+h3 { font-size: 17px; }
+h4 { font-size: 15px; }
+
+p { margin: 0; }
+
+a {
+  color: var(--verdict-indigo-deep);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+@media (prefers-color-scheme: dark) {
+  a { color: #a98bff; }
+}
+
+:focus-visible {
+  outline: 2px solid var(--verdict-indigo);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* Respect a stated preference for less motion. Judging screens are dense and
+   animated movement there is noise, not feedback. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* ------------------------------------------------------------- primitives */
+
+.card {
+  background: var(--surface-raised);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+}
+
+.card--pad { padding: var(--space-5); }
+
+.stack { display: flex; flex-direction: column; gap: var(--space-4); }
+.stack--tight { gap: var(--space-2); }
+.row { display: flex; align-items: center; gap: var(--space-3); }
+.row--wrap { flex-wrap: wrap; }
+.row--between { justify-content: space-between; }
+.spacer { flex: 1 1 auto; }
+
+.muted { color: var(--text-secondary); }
+.dim { color: var(--text-muted); }
+.mono { font-family: var(--font-mono); font-size: 0.86em; }
+.tiny { font-size: 12px; }
+.small { font-size: 13px; }
+.strong { font-weight: 620; }
+.center { text-align: center; }
+.nowrap { white-space: nowrap; }
+
+.gradient-text {
+  background: var(--gradient-brand);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* --------------------------------------------------------------- controls */
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: 9px 16px;
+  min-height: 38px;
+  font: inherit;
+  font-weight: 560;
+  color: var(--text-primary);
+  background: var(--surface-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease, transform 60ms ease;
+}
+
+.button:hover:not(:disabled) { background: var(--surface-sunken); }
+.button:active:not(:disabled) { transform: translateY(1px); }
+
+.button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.button--primary {
+  color: var(--text-on-accent);
+  background: var(--gradient-brand);
+  border-color: transparent;
+  box-shadow: var(--shadow-sm);
+}
+
+.button--primary:hover:not(:disabled) { filter: brightness(1.06); background: var(--gradient-brand); }
+
+.button--danger {
+  color: #fff;
+  background: var(--verdict-red);
+  border-color: transparent;
+}
+
+.button--ghost { background: transparent; border-color: transparent; }
+.button--ghost:hover:not(:disabled) { background: var(--surface-sunken); }
+
+.button--sm { min-height: 30px; padding: 4px 10px; font-size: 13px; }
+
+.input,
+.select,
+.textarea {
+  width: 100%;
+  padding: 9px 12px;
+  font: inherit;
+  color: var(--text-primary);
+  background: var(--surface-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+}
+
+.textarea { min-height: 96px; resize: vertical; }
+
+.input:focus,
+.select:focus,
+.textarea:focus {
+  border-color: var(--verdict-indigo);
+  outline: none;
+  box-shadow: 0 0 0 3px rgb(82 39 255 / 18%);
+}
+
+.field { display: flex; flex-direction: column; gap: var(--space-2); }
+.label { font-size: 13px; font-weight: 560; }
+.hint { font-size: 12px; color: var(--text-muted); }
+
+.range {
+  width: 100%;
+  accent-color: var(--verdict-indigo);
+}
+
+/* ----------------------------------------------------------------- chrome */
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-5);
+  background: color-mix(in srgb, var(--surface-raised) 88%, transparent);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-weight: 680;
+  letter-spacing: -0.03em;
+  font-size: 17px;
+  color: var(--text-primary);
+  text-decoration: none;
+}
+
+.brand__mark {
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  background: var(--gradient-brand);
+  box-shadow: var(--shadow-sm);
+}
+
+.nav { display: flex; gap: var(--space-1); }
+
+.nav a {
+  padding: 6px 11px;
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  text-decoration: none;
+  font-size: 14px;
+  font-weight: 520;
+}
+
+.nav a:hover { background: var(--surface-sunken); color: var(--text-primary); }
+
+.nav a[aria-current='page'] {
+  color: var(--text-primary);
+  background: var(--surface-sunken);
+}
+
+.page {
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: var(--space-6) var(--space-5) var(--space-8);
+}
+
+.page--wide { max-width: 1320px; }
+
+/* The hero is the one place a gradient sits behind text, and only with a solid
+   high-contrast colour on top. */
+.hero {
+  position: relative;
+  overflow: hidden;
+  padding: var(--space-8) var(--space-5);
+  border-radius: var(--radius-lg);
+  background: var(--gradient-wash), var(--gradient-brand);
+  color: #fff;
+  isolation: isolate;
+}
+
+/*
+ * The Grainient canvas fills the hero. `z-index: 0` with the content stacked
+ * above it means the shader is decoration, never something a pointer or a
+ * screen reader has to get through: the canvas is `aria-hidden` and the CSS
+ * gradient underneath it is the fallback, so a browser without WebGL, a browser
+ * with `prefers-reduced-motion`, and a browser that fails to compile the shader
+ * all look like the same design rather than three.
+ */
+.hero__grain {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  opacity: 0.85;
+  pointer-events: none;
+}
+
+.hero > :not(.hero__grain) {
+  position: relative;
+  z-index: 1;
+}
+
+.hero::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background-image: var(--grain);
+  opacity: 0.5;
+  mix-blend-mode: overlay;
+  pointer-events: none;
+}
+
+.hero h1 { color: #fff; }
+.hero p { color: rgb(255 255 255 / 88%); max-width: 62ch; }
+
+/*
+ * The sign-in surface keeps its grain behind the whole column rather than in a
+ * card, so the form sits on the same toothed field as the landing page without
+ * the page needing a full-bleed hero element.
+ */
+.signin__grain {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0.5;
+  mask-image: linear-gradient(180deg, #000 0%, rgb(0 0 0 / 35%) 70%, transparent 100%);
+}
+
+/* ----------------------------------------------------------------- badges */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 9px;
+  font-size: 12px;
+  font-weight: 580;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border-strong);
+  color: var(--text-secondary);
+  background: var(--surface-raised);
+  white-space: nowrap;
+}
+
+.badge--ok { color: var(--verdict-green-deep); border-color: color-mix(in srgb, var(--verdict-green) 40%, transparent); background: color-mix(in srgb, var(--verdict-green) 10%, var(--surface-raised)); }
+.badge--warn { color: var(--verdict-amber); border-color: color-mix(in srgb, var(--verdict-amber) 45%, transparent); background: color-mix(in srgb, var(--verdict-amber) 12%, var(--surface-raised)); }
+.badge--bad { color: var(--verdict-red); border-color: color-mix(in srgb, var(--verdict-red) 40%, transparent); background: color-mix(in srgb, var(--verdict-red) 10%, var(--surface-raised)); }
+.badge--info { color: var(--verdict-indigo-deep); border-color: color-mix(in srgb, var(--verdict-indigo) 40%, transparent); background: color-mix(in srgb, var(--verdict-indigo) 10%, var(--surface-raised)); }
+
+@media (prefers-color-scheme: dark) {
+  .badge--ok { color: #4ade9f; }
+  .badge--info { color: #a98bff; }
+}
+
+/* ----------------------------------------------------------------- tables */
+
+.table-wrap { overflow-x: auto; }
+
+table.data {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+table.data th,
+table.data td {
+  padding: 9px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--border-subtle);
+  vertical-align: top;
+}
+
+table.data th {
+  font-size: 12px;
+  font-weight: 620;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  background: var(--surface-sunken);
+  position: sticky;
+  top: 0;
+}
+
+table.data tbody tr:hover { background: color-mix(in srgb, var(--verdict-indigo) 4%, transparent); }
+table.data td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); }
+
+/* ------------------------------------------------------------------ misc */
+
+.empty {
+  padding: var(--space-7) var(--space-5);
+  text-align: center;
+  color: var(--text-secondary);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--gradient-wash);
+}
+
+.notice {
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-strong);
+  background: var(--surface-sunken);
+  font-size: 14px;
+}
+
+.notice--error { color: var(--verdict-red); border-color: color-mix(in srgb, var(--verdict-red) 35%, transparent); background: color-mix(in srgb, var(--verdict-red) 8%, var(--surface-raised)); }
+.notice--ok { color: var(--verdict-green-deep); border-color: color-mix(in srgb, var(--verdict-green) 35%, transparent); background: color-mix(in srgb, var(--verdict-green) 8%, var(--surface-raised)); }
+.notice--warn { color: var(--verdict-amber); border-color: color-mix(in srgb, var(--verdict-amber) 40%, transparent); background: color-mix(in srgb, var(--verdict-amber) 10%, var(--surface-raised)); }
+
+.meter {
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-sunken);
+  overflow: hidden;
+}
+
+.meter > span {
+  display: block;
+  height: 100%;
+  background: var(--gradient-brand);
+  border-radius: inherit;
+}
+
+.spinner {
+  width: 15px;
+  height: 15px;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--verdict-indigo);
+  border-radius: 50%;
+  animation: spin 700ms linear infinite;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.skeleton {
+  border-radius: var(--radius-sm);
+  background: linear-gradient(90deg, var(--surface-sunken) 25%, var(--surface-raised) 50%, var(--surface-sunken) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.4s ease-in-out infinite;
+}
+
+@keyframes shimmer { to { background-position: -200% 0; } }
+
+/* Off-screen but reachable by a screen reader, for status messages that should
+   not steal focus or shift the layout. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  z-index: 100;
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface-raised);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+}
+
+.skip-link:focus { left: var(--space-4); top: var(--space-4); }
+
+@media (max-width: 720px) {
+  .page { padding: var(--space-5) var(--space-4) var(--space-7); }
+  .topbar { padding: var(--space-3) var(--space-4); }
+  .nav { overflow-x: auto; }
+  h1 { font-size: 24px; }
+  .hero { padding: var(--space-6) var(--space-4); }
+}

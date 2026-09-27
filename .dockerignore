@@ -1,0 +1,40 @@
+# Keep the build context small and, more importantly, keep secrets and runtime
+# state out of it. A `.env` or a SQLite file in the build context risks being
+# copied into an intermediate layer even when a later `COPY` does not mention
+# it — layers are addressed independently, so anything sent to the daemon can be
+# recovered from the cache.
+
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+
+node_modules
+**/node_modules
+
+# Rebuilt inside the image.
+dist
+**/dist
+*.tsbuildinfo
+
+# Never ship a developer's database or uploads into an image.
+storage
+**/storage
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Tests are not needed to run the server and would give anyone who can pull
+# the image a copy of the acceptance harness.
+**/test
+**/*.test.ts
+packages/core/test
+apps/api/test
+
+openapi.json
+*.log
+docs/**/*.png
+README.md

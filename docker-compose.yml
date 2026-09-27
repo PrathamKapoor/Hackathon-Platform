@@ -1,0 +1,58 @@
+# Verdict — hackathon operations with a defensible judging engine.
+#
+#   cp .env.example .env      # then edit SESSION_SECRET
+#   docker compose up --build
+#
+# The service comes up on http://localhost:8080 with a seeded demo event, so
+# there is something to click on before any configuration is done.
+
+services:
+  verdict:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: verdict:local
+    container_name: verdict
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8080}:8080"
+    environment:
+      NODE_ENV: production
+      PORT: 8080
+      # Overridable so `docker compose -f docker-compose.yml -f docker-compose.dev.yml`
+      # can point at a mounted database for development.
+      DATABASE_FILE: /data/verdict.db
+      STORAGE_DIR: /data/uploads
+      PUBLIC_URL: ${PUBLIC_URL:-http://localhost:8080}
+      SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET must be set — copy .env.example to .env and generate one}
+      SESSION_SECURE_COOKIES: ${SESSION_SECURE_COOKIES:-false}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_PRETTY: ${LOG_PRETTY:-false}
+      AUTO_MIGRATE: "true"
+      AUTO_SEED: ${AUTO_SEED:-true}
+      TRUST_PROXY: ${TRUST_PROXY:-false}
+    volumes:
+      # Named volume, not a bind mount: a bind mount into the container risks
+      # SQLite's locking behaviour on filesystems that do not support the
+      # POSIX advisory locks it depends on (some network and Docker Desktop
+      # setups), which fails in ways that look like data corruption.
+      - verdict-data:/data
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8080/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    # A single SQLite writer does not benefit from being scaled horizontally, and
+    # scaling it out would break the WAL locking the whole integrity story rests
+    # on. One container, one volume, one database file.
+    deploy:
+      replicas: 1
+
+volumes:
+  verdict-data:
+    name: verdict-data

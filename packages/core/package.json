@@ -1,0 +1,29 @@
+{
+  "name": "@verdict/core",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Framework-free domain core: state machines, judging mathematics, normalization, aggregation, anomaly detection, assignment. Pure functions, zero I/O.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./types": "./src/types.ts",
+    "./statistics": "./src/statistics.ts",
+    "./random": "./src/random.ts",
+    "./integrity": "./src/integrity.ts",
+    "./time": "./src/time.ts",
+    "./ids": "./src/ids.ts",
+    "./state-machines": "./src/state-machines.ts",
+    "./rubric": "./src/rubric.ts",
+    "./normalization": "./src/normalization.ts",
+    "./aggregation": "./src/aggregation.ts",
+    "./pairwise": "./src/pairwise.ts",
+    "./assignment": "./src/assignment.ts",
+    "./diagnostics": "./src/diagnostics.ts",
+    "./result-pipeline": "./src/result-pipeline.ts",
+    "./csv": "./src/csv.ts",
+    "./validation": "./src/validation.ts"
+  },
+  "scripts": {
+    "test": "node --test --test-reporter=spec \"test/**/*.test.ts\""
+  }
+}

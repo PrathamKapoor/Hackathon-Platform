@@ -1,0 +1,21 @@
+# Normalise line endings so the same tree checks out identically on Linux, macOS
+# and Windows. Without this, every contributor's platform rewrites the whole
+# file and `git diff` shows whole-file changes instead of real edits.
+* text=auto eol=lf
+
+# The shell harness must stay LF even on Windows: `scripts/docker-verify.sh` is
+# executed by bash inside a Linux container and a stray CR breaks shebangs and
+# `\`-continuations.
+*.sh text eol=lf
+Dockerfile text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# These are read as bytes: normalising them would corrupt the file.
+*.db binary
+*.sqlite binary
+*.png binary
+*.jpg binary
+*.webp binary
+*.woff binary
+*.woff2 binary

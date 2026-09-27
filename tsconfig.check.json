@@ -1,0 +1,20 @@
+{
+  // Node-side typecheck: the core, the API, the tests and the scripts.
+  //
+  // The web app is deliberately NOT included. It needs the DOM library and the
+  // `vite/client` types, and adding them here would put browser globals in scope
+  // for the server code — where a stray `document` would typecheck happily and
+  // then fail at runtime. `npm run typecheck` runs both configurations.
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": [
+    "packages/core/src/**/*.ts",
+    "packages/core/test/**/*.ts",
+    "apps/api/src/**/*.ts",
+    "apps/api/test/**/*.ts",
+    "scripts/**/*.ts"
+  ]
+}
