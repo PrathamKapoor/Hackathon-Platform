@@ -20,7 +20,7 @@
  *
  * `apps/api/test/contract.test.ts` asserts the shape of every response used in
  * this file, so a server change fails there first. Run
- * `node apps/api/test/dump-shapes.mts` to re-print the payloads when it does.
+ * \node apps/api/test/dump-shapes.mts` to re-print the payloads when it does.
  *
  * Naming follows the server exactly. Normalising at the boundary would turn a
  * mismatch into a silently wrong value instead of an `undefined` at the use
@@ -133,19 +133,29 @@ export const api = {
 
 export type Role = 'PARTICIPANT' | 'JUDGE' | 'ORGANIZER' | 'ADMIN';
 
+/**
+ * A public user profile.
+ *
+ * mail and state are optional because they are deliberately absent from
+ * most payloads: serializePublicUser withholds the address always, and omits
+ * the state when the account is active. Only the signed-in user's own record and
+ * the administrator's search result carry them, which is why this type must not
+ * assume they are present.
+ */
 export type PublicUser = {
   id: string;
-  email: string;
+  email?: string;
   username: string;
   displayName: string;
   bio: string;
   organization: string;
   skills: string[];
   avatarColor: string;
-  state: string;
+  state?: string;
   roles: Role[];
   eventIds: string[];
   createdAt: string;
+  lastLoginAt?: string | null;
 };
 
 export type SessionInfo = { authenticated: boolean; user: PublicUser | null };
@@ -749,6 +759,9 @@ export type WebhookRow = {
 
 /* ----------------------------------------------------------------- audit */
 
+/** One entry of the audit ledger's action vocabulary, with how often it occurs. */
+export type AuditAction = { action: string; count: number };
+
 export type AuditRow = {
   id: string;
   at: string;
@@ -764,6 +777,295 @@ export type AuditRow = {
   requestId: string;
   ipAddress: string;
   metadata: Record<string, unknown>;
+};
+
+/* ------------------------------------------------------------ diagnostics */
+
+/**
+ * `GET /api/events/{eventId}/diagnostics`.
+ *
+ * Note that this is a GET that persists: computing diagnostics also records the
+ * signals it finds as review flags, so a signal cannot be lost between being
+ * computed and being looked at. The route is organizer-only and the service
+ * re-checks the same thing, so a GET that writes is not a way around the guard.
+ *
+ * The field names below are the engine's, not invented ones. An earlier version
+ * of this file declared `meanDeviationZ`, `lowVariance`/`highVariance`,
+ * `suspicious`, `suspiciousTiming` and a `warnings` array. The server sends
+ * `panelDeviationZ`, `judgeDisagreement` and `thresholds`, and sends **no**
+ * `warnings` at all — so the panel read `undefined.length` and crashed.
+ */
+
+/**
+ * `GET /api/events/{eventId}/diagnostics`.
+ *
+ * Note that this is a GET that persists: computing diagnostics also records the
+ * signals it finds as review flags, so a signal cannot be lost between being
+ * computed and being looked at. The route is organizer-only and the service
+ * re-checks the same thing, so a GET that writes is not a way around the guard.
+ *
+ * The field names below are the engine's, not invented ones. An earlier version
+ * of this file declared `meanDeviationZ`, `lowVariance`/`highVariance`,
+ * `suspicious`, `suspiciousTiming`, a `warnings` array, and typed `signals` as
+ * `string[]`. The server sends `panelDeviationZ`, `judgeDisagreement`,
+ * `thresholds`, **no** `warnings`, and `signals` as full objects. Reading those
+ * wrong fields crashed the panel twice: once on `undefined.length`, once on
+ * `stateLabel` calling `.toLowerCase()` on an object.
+ */
+export type DiagnosticSignal = {
+  type: string;
+  severity: 'LOW' | 'MEDIUM' | 'HIGH';
+  subjectId: string;
+  subjectKind: string;
+  metric: number | null;
+  threshold: number | null;
+  sampleSize: number;
+  evidence: string;
+  recommendedAction: string;
+};
+
+export type JudgeDiagnostic = {
+  judgeId: string;
+  sampleSize: number;
+  mean: number | null;
+  median: number | null;
+  stddev: number | null;
+  min: number | null;
+  max: number | null;
+  range: number | null;
+  coefficientOfVariation: number | null;
+  /** How far this judge's mean sits from the panel, in panel standard deviations. */
+  panelDeviationZ: number | null;
+  panelMeanAbsoluteDeviation: number | null;
+  assigned: number;
+  completed: number;
+  completionRate: number;
+  draftReviews: number;
+  /** Fraction of distinct scores. A judge giving every project the same number
+   *  scores 0 here, which is a review signal, not an accusation. */
+  distinctScoreRatio: number | null;
+  /** Objects, not strings — see the note above. */
+  signals: DiagnosticSignal[];
+};
+
+export type ProjectDiagnostic = {
+  projectId: string;
+  assignedJudges: number;
+  submittedReviews: number;
+  coverage: number;
+  mean: number | null;
+  median: number | null;
+  stddev: number | null;
+  range: number | null;
+  fieldDeviationZ: number | null;
+  judgeDisagreement: number | null;
+  criterionSpread: { key: string; stddev: number; judgeCount: number }[] | null;
+  signals: DiagnosticSignal[];
+};
+
+export type EventDiagnostics = {
+  engineVersion: string;
+  eventId: string;
+  rubricVersionId: string;
+  assignmentVersion: number;
+  computedAt: string;
+  panel: { judges: number; reviews: number; mean: number | null; stddev: number | null } | null;
+  judges: JudgeDiagnostic[];
+  projects: ProjectDiagnostic[];
+  voting: { totalVotes: number; distinctVoters: number; concentration: number; signals: string[] } | null;
+  signals: DiagnosticSignal[];
+  /** The thresholds the run applied, published so a signal can be argued with. */
+  thresholds: Record<string, number>;
+};
+
+/** A persisted review flag. Raw columns, as stored. */
+export type AnomalyRow = {
+  id: string;
+  event_id: string;
+  anomaly_type: string;
+  severity: 'LOW' | 'MEDIUM' | 'HIGH';
+  subject_kind: string;
+  subject_id: string;
+  metric: number | null;
+  threshold: number | null;
+  sample_size: number;
+  evidence: string;
+  recommended_action: string;
+  status: 'OPEN' | 'ACKNOWLEDGED' | 'INVESTIGATING' | 'DISMISSED' | 'RESOLVED';
+  resolution: string;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+/**
+ * The normalization proof: the same stored reviews run through RAW and one
+ * alternative method, side by side.
+ *
+ * `rawRank` and \normalizedRank` are both present precisely so a rank change is
+ * measurable rather than asserted. `movedProjects` is the count that changed.
+ */
+export type NormalizationComparison = {
+  method: string;
+  rows: {
+    projectId: string;
+    rawScore: number | null;
+    normalizedScore: number | null;
+    rawRank: number | null;
+    normalizedRank: number | null;
+    rankDelta: number | null;
+    judges: number;
+  }[];
+  movedProjects: number;
+  warnings: string[];
+  judgeStats: {
+    judgeId: string;
+    displayName?: string;
+    count: number;
+    mean: number | null;
+    stddev: number | null;
+    median: number | null;
+    generosity: number | null;
+  }[];
+  explanation: string;
+};
+
+export type NormalizationRunRow = {
+  id: string;
+  method: string;
+  config: string;
+  configHash: string;
+  engineVersion: string;
+  scope: string;
+  inputHash: string;
+  warnings: string;
+  computedAt: string;
+  scoreCount: number;
+};
+
+/* --------------------------------------------------------------- pairwise */
+
+export type ComparisonRow = {
+  id: string;
+  judgeId: string;
+  leftProjectId: string;
+  rightProjectId: string;
+  leftProjectName: string;
+  rightProjectName: string;
+  outcome: 'LEFT' | 'RIGHT' | 'TIE' | 'SKIPPED';
+  decidedAt: string;
+};
+
+/* ------------------------------------------------------------ certificates */
+
+export type CertificateRow = {
+  id: string;
+  kind: string;
+  reference: string;
+  title: string;
+  issuedAt: string;
+  revokedAt: string | null;
+  recipientName: string;
+  username: string;
+  projectName: string | null;
+  url: string;
+};
+
+export type ParticipationRecord = {
+  id: string;
+  judgeId: string;
+  judgeName: string;
+  judgeEmail: string;
+  assignmentVersion: number;
+  reference: string;
+  judgingOpensAt: string;
+  judgingClosesAt: string;
+  assignedCount: number;
+  completedCount: number;
+  completionStatus: 'COMPLETE' | 'PARTIAL' | 'NOT_STARTED' | 'NO_ASSIGNMENTS';
+  integrityHash: string;
+  issuedAt: string;
+  detail: { assignedProjects?: { projectId: string; projectName: string; status: string; score: number | null; submittedAt: string | null }[] } | null;
+};
+
+/* ------------------------------------------------------------- assignment */
+
+/**
+ * The dry-run result from the assignment engine. Nothing is written until the
+ * `inputHash` is presented back to commit, so a plan is bound to the data it
+ * was generated from.
+ */
+export type AssignmentPreview = {
+  version: number;
+  inputHash: string;
+  strategy: string;
+  seed: string;
+  pairs: { judgeId: string; submissionId: string; projectName?: string; cost?: number; softConflict?: boolean; reason?: string }[];
+  judgeLoad: {
+    judgeId: string;
+    displayName: string;
+    existing: number;
+    assigned: number;
+    total: number;
+    capacity: number;
+    utilisation: number;
+  }[];
+  projectCoverage: { projectId: string; assigned: number; needed: number; coverage: number }[];
+  unassignedProjects: { projectId: string; assigned: number; needed: number; reason: string }[];
+  idleJudges: { judgeId: string; load: number; capacity: number; reason: string }[];
+  excludedJudges: { judgeId: string; displayName: string; reason: string }[];
+  acceptedSoftConflicts: { judgeId: string; projectId: string; kind: string }[];
+  enforcedHardConflicts: { judgeId: string; projectId: string; kind: string }[];
+  summary: {
+    totalPairs: number;
+    projectsFullyCovered: number;
+    projectsPartiallyCovered: number;
+    projectsUncovered: number;
+    judgesUsed: number;
+    loadSpread: { min: number; max: number; mean: number; standardDeviation: number };
+    coverageRatio: number;
+    warnings: string[];
+  };
+  note: string;
+};
+
+/* --------------------------------------------------------------- comments */
+
+export type CommentRow = {
+  id: string;
+  body: string;
+  state: string;
+  parentId: string | null;
+  createdAt: string;
+  editedAt: string | null;
+  reportCount: number;
+  authorId: string;
+  authorName: string;
+  username: string;
+  avatarColor: string;
+};
+
+/* -------------------------------------------------------------- admin ops */
+
+export type AdminOverview = {
+  users: { total: number; active: number; suspended: number };
+  events: number;
+  publishedResults: number;
+  openAnomalies: number;
+  webhookFailures: number;
+  tables: Record<string, number>;
+  authorizationMatrix: { role: string; grants: { resource: string; action: string; scope: string | null }[] }[];
+  database: { ok: boolean; detail?: string };
+};
+
+export type ExportManifest = {
+  event: { id: string; slug: string; name: string };
+  generatedAt: string;
+  generatedBy: string;
+  schemaVersion: number;
+  entities: Record<string, { count: number; columns: string[] }>;
+  note: string;
 };
 
 /* ------------------------------------------------------------ capabilities */

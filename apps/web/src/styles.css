@@ -539,3 +539,164 @@ table.data td.num { text-align: right; font-variant-numeric: tabular-nums; font-
   h1 { font-size: 24px; }
   .hero { padding: var(--space-6) var(--space-4); }
 }
+
+/* ------------------------------------------------- organizer console */
+
+.console__head { margin-bottom: var(--space-5); align-items: flex-end; }
+
+/*
+ * The section nav scrolls horizontally on a narrow screen rather than wrapping
+ * into a tall stack, because a judge checking a result on a phone and an
+ * organizer checking coverage on a laptop both need to reach the section they
+ * want in one gesture. It is a real <nav> with aria-current, so the current
+ * section is announced rather than only coloured.
+ */
+.console__nav {
+  display: flex;
+  gap: var(--space-1);
+  margin-bottom: var(--space-5);
+  padding-bottom: var(--space-2);
+  overflow-x: auto;
+  border-bottom: 1px solid var(--border-subtle);
+  scrollbar-width: thin;
+}
+
+.console__tab {
+  flex: 0 0 auto;
+  padding: 7px 13px;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 540;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.console__tab:hover { background: var(--surface-sunken); color: var(--text-primary); }
+
+.console__tab--active {
+  color: var(--text-primary);
+  background: var(--surface-sunken);
+  border-color: var(--border-subtle);
+  font-weight: 620;
+}
+
+/*
+ * A stat tile. The value is tabular so a column of them lines up, and the hint
+ * line is always present in the markup (empty rather than absent) so the tiles
+ * keep a consistent height whether or not a hint applies.
+ */
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: var(--space-3);
+}
+
+.metrics--tight { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
+
+.metric {
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface-sunken);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+
+.metric__label {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+
+.metric__value {
+  margin-top: 2px;
+  font-size: 1.5rem;
+  font-weight: 660;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.metric__hint { font-size: 12px; color: var(--text-muted); }
+
+/* Event deadline windows, as a definition list. */
+.windows {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: var(--space-3);
+  margin: var(--space-5) 0 0;
+}
+
+.windows dt { font-size: 12px; color: var(--text-muted); }
+.windows dd { margin: 2px 0 0; font-size: 14px; font-weight: 560; }
+
+.detail-list { margin: 0; }
+.detail-list .detail-line { display: flex; }
+
+.detail-line {
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border-subtle);
+  align-items: baseline;
+}
+
+.detail-line dt { color: var(--text-secondary); margin: 0; }
+.detail-line dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
+
+/*
+ * A rubric criterion being edited. `fieldset`/`legend` are used rather than a
+ * div so a screen reader announces the group, and the reset keeps the browser's
+ * default fieldset chrome from fighting the design system.
+ */
+.criterion {
+  margin: 0;
+  padding: var(--space-4);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-sunken);
+}
+
+.criterion__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: var(--space-3);
+}
+
+.criterion__checks { justify-content: center; gap: var(--space-2); flex-wrap: wrap; }
+
+/* A review flag, a moderation item, or a record with actions on the right. */
+.flag {
+  padding: var(--space-4);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-sunken);
+}
+
+.import-result {
+  margin: var(--space-4) 0 0;
+  padding: var(--space-3) var(--space-4);
+  max-height: 320px;
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--surface-sunken);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+@media (max-width: 720px) {
+  /* The console header stacks, and the event picker goes full width rather
+     than being squeezed to an unusable size beside the title. */
+  .console__head { flex-direction: column; align-items: stretch; }
+  .console__head .field { min-width: 0 !important; }
+  .detail-line { flex-direction: column; gap: 2px; }
+  .detail-line dd { text-align: left; }
+  .metric__value { font-size: 1.25rem; }
+}

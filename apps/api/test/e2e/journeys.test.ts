@@ -319,7 +319,22 @@ describe('browser: judge', { skip }, () => {
     await page.getByRole('button', { name: /submit review/i }).click();
     // Submitting returns the judge to their queue.
     await page.waitForURL(/\/judge$/, { timeout: 20_000 });
-    assert.match((await page.textContent('body')) ?? '', /submitted|in progress/i, 'the queue did not reflect the submission');
+    /*
+     * Wait for the queue itself, not just the URL.
+     *
+     * The navigation resolves as soon as the route matches, which is before the
+     * queue request has returned, so the page is still showing "Loading your
+     * queue…" at this point. Asserting against the body then read a loading
+     * state and failed for a submission that had in fact succeeded.
+     */
+    await page.waitForSelector('text=/\\d+ assigned/', { timeout: 20_000 });
+    const queueText = (await page.textContent('body')) ?? '';
+    assert.match(queueText, /assigned/i, 'the queue did not render its progress line');
+    assert.match(
+      queueText,
+      /submitted|in progress/i,
+      'the queue did not reflect the submission it just made',
+    );
   });
 
   test('a judge can record a head-to-head comparison', async () => {
@@ -390,39 +405,49 @@ describe('browser: organizer', { skip }, () => {
     await page.goto('/organize');
     await page.waitForSelector('h1');
 
+    /*
+     * The console is a sectioned shell, so the sections it offers are the thing
+     * to assert. Coverage now lives on Overview and the publication controls on
+     * Results, which is where they belong in the order an organizer works.
+     */
+    await page.waitForSelector('.console__nav', { timeout: 15_000 });
+    const sections = await page.locator('.console__nav button').allInnerTexts();
+    for (const expected of ['Overview', 'Panel', 'Assignments', 'Rubric', 'Results', 'Diagnostics', 'Audit']) {
+      assert.ok(sections.includes(expected), `the console offers no ${expected} section. Found: ${sections.join(', ')}`);
+    }
+
+    // Coverage, on the Overview section, with real numbers.
+    await page.waitForSelector('.metric', { timeout: 20_000 });
     const body = (await page.textContent('body')) ?? '';
     assert.match(body, /coverage|judging/i, 'no coverage information on the organizer console');
-    assert.match(body, /compute|snapshot|publish/i, 'no publication controls on the organizer console');
+    assert.match(body, /registrations|teams|projects/i, 'the overview reports no event counts');
     await h.shot(page, 'organizer-console');
   });
 
   test('an organizer can compute, snapshot, publish and verify a result', async () => {
     const page = await h.signedIn(ACCOUNTS.organizer);
     await page.goto('/organize');
-    await page.waitForSelector('h1');
+    await page.waitForSelector('.console__nav');
 
-    // Switch to the results tab.
-    await page.getByRole('button', { name: /^results$/i }).click();
-    await page.waitForSelector('text=/publish/i', { timeout: 15_000 });
+    // The publication sequence lives on the Results section.
+    await page.getByRole('button', { name: 'Results', exact: true }).click();
+    await page.waitForSelector('h2:text-is("1 · Compute")', { timeout: 20_000 });
 
-    await page.getByRole('button', { name: /1 · compute/i }).click();
+    await page.getByRole('button', { name: 'Compute', exact: true }).click();
     // The run summary appears once the run is computed.
-    await page.waitForSelector('text=/last computed run/i', { timeout: 30_000 });
+    await page.waitForSelector('text=/computed run/i', { timeout: 30_000 });
 
-    await page.getByRole('button', { name: /2 · snapshot/i }).click();
-    await page.waitForSelector('text=/verify reproduction/i', { timeout: 20_000 });
+    await page.getByRole('button', { name: /2 . snapshot/i }).click();
+    await page.waitForSelector('text=/working with snapshot/i', { timeout: 20_000 });
+
     // The verify button only becomes available once a snapshot exists.
-    const verifyEnabled = await page.getByRole('button', { name: /4 · verify/i }).isEnabled();
-    assert.ok(verifyEnabled, 'verification is unavailable after snapshotting');
+    const verify = page.getByRole('button', { name: /4 . verify/i });
+    assert.ok(await verify.isEnabled(), 'verification is unavailable after snapshotting');
 
-    await page.getByRole('button', { name: /4 · verify/i }).click();
+    await verify.click();
     await page.waitForSelector('text=/reproduction/i', { timeout: 30_000 });
     const body = (await page.textContent('body')) ?? '';
-    assert.match(
-      body,
-      /MATCH|MISMATCH/,
-      'the verification result was not shown',
-    );
+    assert.match(body, /MATCH|MISMATCH/, 'the verification result was not shown');
     assert.doesNotMatch(body, /MISMATCH/, 'a freshly computed result did not reproduce');
     await h.shot(page, 'organizer-verified');
   });
@@ -430,14 +455,18 @@ describe('browser: organizer', { skip }, () => {
   test('an organizer is offered the score table with real per-project data', async () => {
     const page = await h.signedIn(ACCOUNTS.organizer);
     await page.goto('/organize');
-    await page.waitForSelector('h1');
+    await page.waitForSelector('.console__nav');
 
-    const rows = page.locator('table tbody tr');
+    // The per-project score table is on the Overview section.
+    await page.waitForSelector('h2:text-is("Dogfood 2026")', { timeout: 20_000 });
+    await page.waitForSelector('table.data tbody tr', { timeout: 20_000 });
+
+    const rows = page.locator('table.data tbody tr');
     assert.ok((await rows.count()) > 0, 'the organizer score table is empty');
 
     // Numbers must be derived from the seeded data, not hard-coded.
-    const coverageRow = (await rows.first().textContent()) ?? '';
-    assert.match(coverageRow, /\d/, 'the coverage row contains no numbers');
+    const firstRow = (await rows.first().textContent()) ?? '';
+    assert.match(firstRow, /\d/, 'the score row contains no numbers');
     await h.shot(page, 'organizer-coverage');
   });
 });

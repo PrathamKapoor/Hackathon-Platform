@@ -34,18 +34,28 @@ describe('browser: newly routed surfaces', () => {
     await firstCard.click();
     await page.waitForURL('**/projects/**');
 
-    // A real project page, not the 404: it has a heading, a description and the
-    // sections a visitor needs to judge the project on its own merits.
-    await page.waitForSelector('h1');
+    /*
+     * Wait for the project to load, not just the route.
+     *
+     * The route matches as soon as the URL changes, which is while the page is
+     * still showing "Loading project". Reading the body at that point found
+     * neither the 404 page nor any project content, and the assertion below —
+     * which exists precisely to prove the page is populated — failed on a
+     * perfectly good page.
+     */
+    await page.waitForSelector('h1', { timeout: 20_000 });
+    await page.waitForSelector('text=Community vote', { timeout: 20_000 });
+
     const heading = (await page.locator('h1').first().innerText()).trim();
     assert.ok(heading.length > 0, 'the project page has a name');
 
     const body = await page.locator('main').innerText();
     assert.ok(!body.includes('Nothing here'), 'the project page is not the 404 page');
+    assert.ok(!body.includes('Loading project'), 'the project page is still loading');
     // Screenshots or the long description, so the page is genuinely populated.
     assert.ok(
       body.includes('About this project') || body.includes('The problem') || body.includes('Screenshots'),
-      'the project page renders real project content',
+      `the project page renders no project content:\n${body.slice(0, 400)}`,
     );
     await harness.shot(page, 'public-project');
     await context.close();

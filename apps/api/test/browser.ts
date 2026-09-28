@@ -9,7 +9,8 @@
  * An OS-assigned ephemeral port avoids both collisions and leftover state.
  */
 
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:net';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
@@ -79,9 +80,19 @@ export async function createBrowserHarness(options: { seed?: boolean; dir?: stri
   }
   mkdirSync(SHOTS, { recursive: true });
 
-  // The directory is supplied by the caller so the caller can clean it up; the
-  // harness only needs somewhere writable for the database.
-  const dir = options.dir ?? process.cwd();
+  /*
+   * A private temp directory per harness, matching `harness.ts`.
+   *
+   * This used to default to `process.cwd()` with a fixed `browser-e2e.db`
+   * filename, which meant two things went wrong. A stale file left by an earlier
+   * run was reused, so `seedDemoData` hit `UNIQUE constraint failed:
+   * users.username_normalized` and the whole suite failed for a reason that had
+   * nothing to do with the code under test. And running two browser suites in
+   * the same invocation made them fight over one database file. A temp directory
+   * removes both, and it is removed on close.
+   */
+  const owned = options.dir === undefined;
+  const dir = options.dir ?? mkdtempSync(join(tmpdir(), 'verdict-browser-'));
   const port = await freePort();
   const base = `http://127.0.0.1:${String(port)}`;
 
@@ -169,6 +180,9 @@ export async function createBrowserHarness(options: { seed?: boolean; dir?: stri
       await browser.close();
       await built.close();
       db.close();
+      // Only remove the directory when this harness created it, so a caller
+      // that supplied one keeps control of its own files.
+      if (owned) rmSync(dir, { recursive: true, force: true });
     },
   };
 }

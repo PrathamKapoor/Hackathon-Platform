@@ -114,6 +114,30 @@ export function serializeSelf(user: PublicUser) {
   };
 }
 
+/**
+ * The administrator's view of a user.
+ *
+ * `serializePublicUser` deliberately withholds the email address entirely, and
+ * omits `state` when the account is active — both correct for a public payload.
+ * But the admin console has to *find* someone by address and decide whether to
+ * suspend them, so it needs both. Using the public serializer there meant the
+ * search box could not match an address, the state column rendered blank, and
+ * `stateLabel(undefined)` threw inside the panel — which, with no error boundary
+ * at the time, took the whole console down.
+ *
+ * This shape is reachable only from `/api/users/search`, which requires the
+ * `user read` permission, and is therefore organizer-and-above. The email is
+ * disclosed there and nowhere else.
+ */
+export function serializeAdminUser(user: PublicUser, eventIds: string[] = []) {
+  return {
+    ...serializePublicUser(user, eventIds),
+    email: user.email,
+    state: user.state,
+    lastLoginAt: user.lastLoginAt ?? null,
+  };
+}
+
 export function safeArray(value: string): string[] {
   try {
     const parsed: unknown = JSON.parse(value);

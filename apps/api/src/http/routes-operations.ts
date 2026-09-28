@@ -845,6 +845,28 @@ export function registerJudgingRoutes(app: FastifyInstance, services: Services, 
     errors: ['VALIDATION_FAILED', 'IMMUTABLE'],
   });
 
+  app.get('/api/rubrics/:rubricId/versions', async (request) => {
+    const params = z.object({ rubricId: Id }).parse(request.params);
+    const rubric = services.db.get<{ event_id: string }>('SELECT event_id FROM rubrics WHERE id = :id', { id: params.rubricId });
+    if (rubric === null) throw errors.notFound('Rubric', params.rubricId);
+    requirePermission(services, request.ctx, 'rubric', 'read', { inOrganizedEvent: canManageEvent(request.ctx.actor, rubric.event_id) }, { eventId: rubric.event_id, resourceType: 'rubric' });
+    const versions = services.rubrics.listVersions(params.rubricId);
+    return {
+      data: versions.map((row) => ({
+        ...row,
+        // Criteria are the questions. Without them a version history is a list
+        // of numbers, and the organizer needs to see which version asked what.
+        criteria: services.rubrics.criteria(row.id),
+      })),
+      note: 'A version is DRAFT while it can still be edited and LOCKED once any score exists against it. Changing the questions therefore means publishing a new version; every review keeps the version it was started against.',
+    };
+  });
+  registry.register({
+    method: 'GET', path: '/api/rubrics/{rubricId}/versions', tags: ['rubrics'], auth: 'organizer',
+    summary: 'Every version of a rubric, with its criteria and lock state.',
+    permission: { resource: 'rubric', action: 'read' },
+  });
+
   app.post('/api/rubrics/:rubricId/versions', async (request, reply) => {
     const params = z.object({ rubricId: Id }).parse(request.params);
     const rubric = services.db.get<{ event_id: string }>('SELECT event_id FROM rubrics WHERE id = :id', { id: params.rubricId });

@@ -31,7 +31,7 @@ import {
 } from './context.ts';
 import { actorContext } from '../services/context.ts';
 import { FIELD_TYPES } from '../services/registration-service.ts';
-import { serializeEvent, serializePublicUser } from './serializers.ts';
+import { serializeAdminUser, serializeEvent, serializePublicUser } from './serializers.ts';
 
 const Id = z.string().min(3).max(64);
 const InstantString = z.string().min(4).max(40);
@@ -381,7 +381,10 @@ export function registerProfileRoutes(app: FastifyInstance, services: Services, 
     const paging = normalisePaging(query);
     const result = services.auth.search(query.search, paging.limit, paging.offset);
     return {
-      data: result.rows.map((row) => serializePublicUser(services.auth.toPublicUser(row))),
+      // The admin view, not the public one: an operator searching for someone
+      // needs their address to match on it and their state to decide whether to
+      // suspend them. Reachable only behind `user read`.
+      data: result.rows.map((row) => serializeAdminUser(services.auth.toPublicUser(row))),
       pagination: { page: paging.page, perPage: paging.perPage, total: result.total, totalPages: Math.ceil(result.total / paging.perPage), hasMore: paging.offset + paging.limit < result.total },
     };
   });

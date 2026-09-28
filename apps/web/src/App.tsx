@@ -19,7 +19,7 @@ import { SignInPage } from './pages/SignInPage.tsx';
 import { JudgeQueuePage } from './pages/JudgeQueuePage.tsx';
 import { ReviewPage } from './pages/ReviewPage.tsx';
 import { PairwisePage } from './pages/PairwisePage.tsx';
-import { OrganizerPage } from './pages/OrganizerPage.tsx';
+import { OrganizerPage } from './organizer/Console.tsx';
 import { WorkspacePage } from './pages/WorkspacePage.tsx';
 import { ProjectPage } from './pages/ProjectPage.tsx';
 import { CertificatePage } from './pages/CertificatePage.tsx';
