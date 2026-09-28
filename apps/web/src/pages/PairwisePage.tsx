@@ -165,7 +165,7 @@ function SideCard({ side, label }: { side: { id: string; projectName: string; sh
       <span className="badge" aria-hidden="true">
         {label}
       </span>
-      <h3 style={{ margin: '8px 0 4px' }}>{side.projectName}</h3>
+      <h2 className="card-title" style={{ margin: '8px 0 4px' }}>{side.projectName}</h2>
       <p className="small muted" style={{ margin: 0 }}>
         {side.shortDescription}
       </p>

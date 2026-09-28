@@ -41,6 +41,21 @@ function freePort(): Promise<number> {
   });
 }
 
+export type Viewport = { width: number; height: number };
+
+/** The viewports a responsive check has to cover, smallest first. */
+export const VIEWPORTS = {
+  mobile: { width: 390, height: 844 },
+  tablet: { width: 768, height: 1024 },
+  laptop: { width: 1280, height: 800 },
+  desktop: { width: 1440, height: 900 },
+} as const satisfies Record<string, Viewport>;
+
+export type ContextOptions = {
+  reducedMotion?: 'reduce' | 'no-preference';
+  viewport?: Viewport;
+};
+
 export type BrowserHarness = {
   base: string;
   browser: Browser;
@@ -52,11 +67,13 @@ export type BrowserHarness = {
    *
    * `options` is passed straight to `browser.newContext`, which is how a test
    * asks for `reducedMotion: 'reduce'` to check that an animated background
-   * actually respects the preference rather than merely slowing down.
+   * actually respects the preference rather than merely slowing down, or a
+   * `viewport` to check the layout at that size rather than assuming the one
+   * every other test happens to use.
    */
-  freshContext: (options?: { reducedMotion?: 'reduce' | 'no-preference' }) => Promise<BrowserContext>;
+  freshContext: (options?: ContextOptions) => Promise<BrowserContext>;
   /** A page already signed in as the given seeded account. */
-  signedIn: (email: string) => Promise<Page>;
+  signedIn: (email: string, options?: ContextOptions) => Promise<Page>;
   shot: (page: Page, name: string) => Promise<void>;
   close: () => Promise<void>;
 };
@@ -118,12 +135,10 @@ export async function createBrowserHarness(options: { seed?: boolean; dir?: stri
 
   const browser = await launch();
 
-  const freshContext = async (
-    options: { reducedMotion?: 'reduce' | 'no-preference' } = {},
-  ): Promise<BrowserContext> => {
+  const freshContext = async (options: ContextOptions = {}): Promise<BrowserContext> => {
     const context = await browser.newContext({
       baseURL: base,
-      viewport: { width: 1440, height: 900 },
+      viewport: options.viewport ?? VIEWPORTS.desktop,
       // A fixed locale and zone keep date rendering predictable, without
       // changing what the product does.
       locale: 'en-GB',
@@ -134,8 +149,8 @@ export async function createBrowserHarness(options: { seed?: boolean; dir?: stri
     return context;
   };
 
-  const signedIn = async (email: string): Promise<Page> => {
-    const context = await freshContext();
+  const signedIn = async (email: string, options: ContextOptions = {}): Promise<Page> => {
+    const context = await freshContext(options);
     const page = await context.newPage();
 
     // Signed in through the API so a test about judging is not blocked by the

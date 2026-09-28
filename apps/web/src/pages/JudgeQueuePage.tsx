@@ -100,7 +100,7 @@ export function JudgeQueuePage() {
                   <ScoreStateBadge state={item.scoreState} />
                   {item.status !== 'ASSIGNED' ? <span className="badge">{stateLabel(item.status)}</span> : null}
                 </div>
-                <h3 style={{ marginBottom: 4 }}>{item.projectName}</h3>
+                <h2 className="card-title" style={{ marginBottom: 4 }}>{item.projectName}</h2>
                 <p className="small muted" style={{ margin: 0 }}>
                   {item.shortDescription}
                 </p>

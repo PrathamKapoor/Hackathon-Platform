@@ -108,10 +108,18 @@ export function EventPage({ eventRef }: { eventRef: string }) {
   );
 }
 
+/**
+ * A top-level section of the page.
+ *
+ * `h2`, not `h3`: each panel sits directly under the page's `h1`, and a heading
+ * that skips a level breaks the outline a screen reader user navigates by. The
+ * heading level is a structural fact about the page, not a size choice - the
+ * size comes from the stylesheet.
+ */
 function Panel({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <section className="card card--pad" style={{ flex: '1 1 280px' }}>
-      <h3>{title}</h3>
+      <h2>{title}</h2>
       <div style={{ marginTop: 12 }}>{children}</div>
     </section>
   );

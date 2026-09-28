@@ -128,6 +128,18 @@ h2 { font-size: 22px; }
 h3 { font-size: 17px; }
 h4 { font-size: 15px; }
 
+/*
+ * A section heading that reads as a card title.
+ *
+ * The gallery, the judging queue and the head-to-head view each list items
+ * under a single h1, so their per-item headings are genuinely h2 - an h3 there
+ * skipped a level and broke the outline a screen reader user navigates by. This
+ * is an h2 sized for a card rather than for a page section, which is what those
+ * three wanted when they reached for an h3, so the outline is corrected without
+ * the cards growing.
+ */
+.card-title { font-size: 17px; }
+
 p { margin: 0; }
 
 a {
@@ -559,6 +571,27 @@ table.data td.num { text-align: right; font-variant-numeric: tabular-nums; font-
 @media (max-width: 720px) {
   .review-nav { flex-direction: column; align-items: stretch; }
   .review-nav .button { max-width: 100%; }
+
+  /*
+   * A thumb, not a cursor.
+   *
+   * `.button--sm` is 30px tall, which is the right density for a row of chips
+   * and toolbar buttons on a laptop with a pointer. On a phone the same control
+   * is hit with a thumb, and 30px is below what anyone reliably lands on. So the
+   * small variant is restored to a 40px target on narrow screens - the point of
+   * a size variant is density where density helps, not a smaller target
+   * everywhere.
+   */
+  .button--sm { min-height: 40px; padding: 8px 12px; }
+
+  /*
+   * The gallery's technology filters are toggle buttons wearing a badge's 12px
+   * pill styling, which puts their target at 20px - too small to hit with a
+   * thumb. A badge that is a control has to be a control-sized target, so on a
+   * narrow screen it gets one. Only interactive badges are affected: the static
+   * ones, which are labels rather than targets, keep the compact pill.
+   */
+  button.badge { min-height: 40px; padding: 8px 14px; font-size: 13px; }
 }
 
 /* ------------------------------------------------- organizer console */
@@ -603,6 +636,16 @@ table.data td.num { text-align: right; font-variant-numeric: tabular-nums; font-
   background: var(--surface-sunken);
   border-color: var(--border-subtle);
   font-weight: 620;
+}
+
+/*
+ * The section strip is the console's primary navigation, and on a phone it is
+ * scrolled horizontally rather than wrapped, so a tab is reached by tapping
+ * something a thumb has to hit. 38px from the padding alone is under the 40px
+ * target, so the tabs get one on narrow screens.
+ */
+@media (max-width: 720px) {
+  .console__tab { min-height: 40px; padding: 9px 13px; }
 }
 
 /*

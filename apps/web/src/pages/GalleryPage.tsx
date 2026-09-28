@@ -155,9 +155,9 @@ function GalleryCardView({ project, eventSlug }: { project: GalleryCard; eventSl
           ) : null}
           {project.team !== null ? <span className="badge">{project.team.name}</span> : null}
         </div>
-        <h3>
+        <h2 className="card-title">
           <Link to={`/e/${eventSlug}/projects/${project.slug}`}>{project.projectName}</Link>
-        </h3>
+        </h2>
         <p className="small muted" style={{ marginTop: 6 }}>
           {project.shortDescription}
         </p>
