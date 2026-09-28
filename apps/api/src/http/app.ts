@@ -49,6 +49,7 @@ import {
   registerGalleryRoutes,
   registerWebhookRoutes,
 } from './routes-operations.ts';
+import { registerInsightRoutes } from './routes-insights.ts';
 
 export type BuiltApp = {
   app: FastifyInstance;
@@ -315,6 +316,11 @@ export async function buildApp(options: BuildOptions = {}): Promise<BuiltApp> {
   registerWebhookRoutes(app, services, registry);
   registerTransferRoutes(app, services, registry);
   registerOpsRoutes(app, services, registry);
+  // Diagnostics, review flags, normalization proof, pairwise results,
+  // certificates and moderation. Registered after the core routes so a
+  // resource-scoped path such as `/api/comments/:id/moderate` is matched before
+  // any future catch-all could shadow it.
+  registerInsightRoutes(app, services, registry);
 
   /* ------------------------------------------------------------ OpenAPI */
 

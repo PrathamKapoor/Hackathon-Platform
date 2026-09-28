@@ -1,6 +1,5 @@
 import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { Page } from 'playwright';
 import { ACCOUNTS, createBrowserHarness, type BrowserHarness } from '../browser.ts';
 
 /**

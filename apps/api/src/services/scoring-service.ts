@@ -664,6 +664,22 @@ export class ScoringService {
     return { id, outcome: input.outcome };
   }
 
+  /**
+   * Every comparison recorded on an event, with project names resolved.
+   *
+   * This previously selected `decided_at`, a column that does not exist on
+   * `pairwise_comparisons` — the table stores `created_at`. It was never a
+   * problem because nothing routed to this method; the moment an organizer
+   * endpoint was wired up it returned 500. `PairwiseComparison.decidedAt` is an
+   * alias for the same value, so the shape the core expects is unchanged.
+   *
+   * The service permits a judge to read these, but the route that exposes them
+   * is organizer-scoped and does not. That asymmetry is deliberate: this query
+   * returns comparisons for *every* judge on the event, and pairwise outcomes
+   * are judge data. A judge who wants their own history gets it from their
+   * comparison queue, which is scoped to them. Loosening the route without
+   * scoping the query would leak the panel's head-to-head record.
+   */
   listComparisons(eventId: string, ctx: ActorContext) {
     const actor = requireActor(ctx);
     if (!canManageEvent(actor as never, eventId) && !this.judges.findByUser(eventId, actor.id)) {
@@ -671,7 +687,7 @@ export class ScoringService {
     }
     return this.db.all<PairwiseComparison>(
       `SELECT id, judge_id AS judgeId, left_submission_id AS leftProjectId,
-              right_submission_id AS rightProjectId, outcome, decided_at AS decidedAt
+              right_submission_id AS rightProjectId, outcome, created_at AS decidedAt
        FROM pairwise_comparisons WHERE event_id = :e ORDER BY created_at`,
       { e: eventId },
     );
