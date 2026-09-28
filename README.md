@@ -154,7 +154,7 @@ if ignored:
 
 Everything is in the database file and the uploads directory, both under
 `/data`. For a consistent copy, use SQLite's own backup rather than `cp`, which
-can capture a torn write:
+can capture a torn write against a WAL-mode database:
 
 ```bash
 docker compose exec verdict node -e "
@@ -163,6 +163,13 @@ docker compose exec verdict node -e "
 "
 docker compose cp verdict:/data/backup.db ./verdict-backup.db
 ```
+
+Back up the uploads directory too — it is separate from the database and not
+recoverable from it. And **check the restore**: `PRAGMA integrity_check` on the
+copy, then boot the application on it and confirm the published result still
+reproduces the same integrity hash. A backup nobody has restored is a
+hypothesis. `docs/OPERATIONS.md` has the full procedure, including the restore
+steps and an automated test that does exactly this check.
 
 ### Behind a reverse proxy
 
@@ -200,20 +207,33 @@ What is implemented, and where to check it:
 - **Authorization** — one declarative matrix in `apps/api/src/lib/rbac.ts`. No
   route decides permission for itself; they state the facts they established
   (owner, assigned judge, team member, organizer of this event) and the matrix
-  decides. Anonymous is 401, authenticated-but-refused is 403.
+  decides. An anonymous caller is 401 and a refused one is 403 — though most
+  handlers resolve the record before checking, so a caller with a well-formed but
+  nonexistent id gets 404 first. Clients should not read 401 as a guarantee.
 - **Audit** — append-only, enforced by database triggers rather than
   convention. Denials are recorded too, so "nobody tried that" is a claim the
   ledger can support.
+- **Content-Security-Policy** — applied to every response, with `script-src
+  'self'` and no `unsafe-inline` for scripts. This is the header that contains a
+  stored XSS on a page rendering participant-submitted text, and it used to be
+  absent entirely: the policy was disabled in Fastify with a comment claiming the
+  static handler set a real one, and the static handler set none.
 - **Uploads** — magic-byte sniffing, size caps, SHA-256 recorded at upload and
-  re-verified before serving, `nosniff` and an explicit disposition.
+  re-verified before serving, `nosniff` and an explicit disposition. SVG is
+  refused outright.
 - **Webhooks** — SSRF protection: private and link-local addresses are refused
-  unless explicitly allowed, redirects are not followed blindly, and deliveries
-  are signed.
+  unless explicitly allowed, the hostname is re-resolved and re-checked before
+  every delivery, redirects are not followed, and deliveries are signed with the
+  timestamp inside the signed material.
 - **Rate limiting** — keyed on the account where one is identified, because a
-  per-IP limit is trivially evaded and punishes shared NAT.
+  per-IP limit is trivially evaded and punishes shared NAT. `TRUST_PROXY` defaults
+  to off, so a client cannot spoof its way past it.
 
 The test suite asserts these, and several of the tests are named after bugs that
-were found and fixed during development. See `apps/api/test/security.test.ts`.
+were found and fixed during development. `docs/THREAT-MODEL.md` records what is
+left over — no MFA, no encryption at rest, an in-process rate limiter, and an
+audit ledger that is append-only to the database but not tamper-evident against
+an operator with the file.
 
 ---
 
@@ -221,18 +241,37 @@ were found and fixed during development. See `apps/api/test/security.test.ts`.
 
 ```bash
 npm run typecheck      # both the node and the browser project
-npm test               # 269 tests
+npm test               # 382 unit and integration tests
 npm run test:core      # the judging engine alone
-npm run test:api       # API, security, static serving
+npm run test:api       # API, security, migrations, static serving
+npm run test:e2e       # builds, then 45 browser tests
 npm run build          # the web client
-npm run openapi        # export openapi.json from the Zod schemas
+npm run openapi        # export openapi.json from the route registry
 npm run check:openapi  # fail if openapi.json is stale
-npm run verify         # typecheck, test, build, acceptance
+npm run acceptance     # 35-check release harness
+npm run verify         # typecheck, test, build, e2e, acceptance
 ```
 
-The API documentation is generated from the same Zod schemas that validate
-requests at runtime, so it cannot drift from the implementation. It is served at
-`/api/docs` and exported as `/api/openapi.json`.
+The API documentation is generated from the route registry, and served live at
+`/api/docs` and `/api/openapi.json`. It is checked in CI, so it cannot fall
+silently behind the implementation — but it is not a perfect description of it,
+and the gaps are listed rather than glossed: success statuses, query parameters
+and the `requestId` header in the published document are all known to be wrong or
+incomplete. See the closing section of `docs/API.md` before treating it as
+authoritative.
+
+### Documentation
+
+| | |
+| --- | --- |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Request lifecycle, storage model, failure modes considered. |
+| [`docs/JUDGING.md`](docs/JUDGING.md) | The mathematics: normalization, aggregation, pairwise, diagnostics. |
+| [`docs/DATA-MODEL.md`](docs/DATA-MODEL.md) | Every table, what the schema guarantees, and where it can drift. |
+| [`docs/API.md`](docs/API.md) | Conventions, error codes, all 140 operations, known spec defects. |
+| [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) | Assets, trust boundaries, mitigations, and what is left over. |
+| [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) | Layout, commands, testing, conventions. |
+| [`docs/OPERATIONS.md`](docs/OPERATIONS.md) | Deploy, back up, restore, upgrade, recover, capacity. |
+| [`docs/ACCEPTANCE-REPORT.md`](docs/ACCEPTANCE-REPORT.md) | What was verified, what was fixed, and what is still open. |
 
 ### Testing approach
 
