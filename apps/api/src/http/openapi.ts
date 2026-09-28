@@ -119,7 +119,14 @@ export function buildOpenApiDocument(options: OpenApiOptions): Record<string, un
   const paginationSchema = toJsonSchema(PAGINATION_QUERY, 'input');
   if (paginationSchema) schemas.PaginationQuery = paginationSchema;
 
-  for (const route of options.registry.all()) {
+  /*
+   * `published()`, not `all()`. A route registered with `hidden: true` carries a
+   * comment saying it should be kept out of the published document, and the
+   * generator ignored that entirely - so the health and readiness probes
+   * appeared in the spec despite being marked hidden, and `published()` was dead
+   * code. The code's stated intent and the generator now agree.
+   */
+  for (const route of options.registry.published()) {
     const entry = paths[route.path] ?? {};
     const operation: Record<string, unknown> = {
       operationId: operationIdFor(route),

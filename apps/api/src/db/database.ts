@@ -61,8 +61,28 @@ export class Database {
     }
     this.raw.exec('PRAGMA synchronous = NORMAL');
     this.raw.exec('PRAGMA busy_timeout = 5000');
-    this.raw.exec('PRAGMA foreign_keys_check');
     this.raw.exec('PRAGMA temp_store = MEMORY');
+
+    /*
+     * There is deliberately no foreign key check here.
+     *
+     * There used to be one - `PRAGMA foreign_keys_check` - and it did nothing
+     * twice over. The pragma is spelled `foreign_key_check`, singular, so SQLite
+     * ignored it as an unknown pragma; and `exec` discards result rows, so even
+     * spelled correctly a check that returned violations would have had them
+     * thrown away. A line that looks like a safety check and is not is worse
+     * than no line.
+     *
+     * The real check is `PRAGMA foreign_key_check` after migrating, in
+     * `migrate-cli.ts`, where its result is inspected and a non-zero count sets
+     * a failing exit code. It belongs there rather than in the constructor
+     * because on a fresh database the constructor has nothing to check, and
+     * because a violation found in an upgraded database is a data problem for an
+     * operator to see and fix, not a reason to refuse to boot: migration 13
+     * added a foreign key to `user_roles.event_id` that earlier versions never
+     * enforced, so a database that was perfectly valid under the old schema can
+     * legitimately hold a role pointing at an event that no longer exists.
+     */
   }
 
   migrate(): { applied: number[]; version: number } {
@@ -88,6 +108,22 @@ export class Database {
   /** Execute a raw DDL/DML script with no parameters. */
   run(sql: string): void {
     this.raw.exec(sql);
+  }
+
+  /**
+   * Rows that violate a declared foreign key, or an empty array.
+   *
+   * `PRAGMA foreign_key_check` returns one row per violation, so the check is
+   * only a check if those rows are read. `exec` would run it and throw the
+   * answer away, which is what made the previous attempt at this a no-op.
+   *
+   * Intended to be run after migrating, by whoever can act on the answer. A
+   * violation is a data problem rather than a code problem: SQLite does not
+   * re-validate existing rows when a foreign key is added, so an upgraded
+   * database can hold rows the *current* schema would refuse to create.
+   */
+  foreignKeyViolations(): { table: string; rowid: number | null; parent: string; fkid: number }[] {
+    return this.all('PRAGMA foreign_key_check');
   }
 
   /** Fetch exactly one row, or `null`. */

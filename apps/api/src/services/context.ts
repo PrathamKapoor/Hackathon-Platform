@@ -15,7 +15,7 @@ import { createLogger, type Logger } from '../lib/logger.ts';
 import { AuthService } from '../lib/auth.ts';
 import { now, type Instant } from '@verdict/core/time';
 import type { Actor } from '../lib/rbac.ts';
-import { toApiError } from '../lib/errors.ts';
+import { errors } from '../lib/errors.ts';
 
 import { EventService } from './event-service.ts';
 import { RegistrationService } from './registration-service.ts';
@@ -57,9 +57,19 @@ export function actorContext(input: {
   };
 }
 
+/**
+ * The signed-in actor, or a 401.
+ *
+ * This threw a plain `Error` before, which no branch of `toApiError` maps, so it
+ * surfaced as `INTERNAL_ERROR` / 500. Three operations - a judge accepting an
+ * invitation, an organizer's judge transition, and declaring a conflict - reach
+ * `requireActor` as their first line, so an anonymous caller got a 500 from all
+ * three. A 500 says "this deployment is broken" and trips alerting; the truth is
+ * that the caller is not signed in, which is a 401 and a client's job to handle.
+ */
 export function requireActor(ctx: ActorContext): Actor {
   if (ctx.actor === null) {
-    throw toApiError(new Error('An authenticated actor is required for this operation.'));
+    throw errors.unauthenticated('Sign in to continue.');
   }
   return ctx.actor;
 }

@@ -499,8 +499,12 @@ export function registerGalleryRoutes(app: FastifyInstance, services: Services, 
   registry.register({ method: 'GET', path: '/api/events/{eventId}/gallery/{slug}', tags: ['submissions'], auth: 'none', summary: 'One project page with team, track and screenshots.' });
 
   app.get('/api/embed/:eventId.json', async (request, reply) => {
-    const params = z.object({ eventId: Id, limit: z.coerce.number().int().min(1).max(200).default(24) }).parse(request.params);
-    const payload = services.gallery.embedPayload(eventIdOf(services, params.eventId), params.limit, ctx(request));
+    // `limit` is read from the query, not from the path. Parsing it out of
+    // `request.params` meant the default always won and `?limit=` was silently
+    // ignored - a schema that looks like a query contract and is not one.
+    const params = z.object({ eventId: Id }).parse(request.params);
+    const query = z.object({ limit: z.coerce.number().int().min(1).max(200).default(24) }).parse(request.query);
+    const payload = services.gallery.embedPayload(eventIdOf(services, params.eventId), query.limit, ctx(request));
     /*
      * The content type is stated rather than left to Fastify.
      *
@@ -987,13 +991,16 @@ export function registerJudgingRoutes(app: FastifyInstance, services: Services, 
 
   // ---- pairwise
   app.get('/api/events/:eventId/pairwise/queue', async (request) => {
-    const params = z.object({ eventId: Id, pairs: z.coerce.number().int().min(1).max(200).default(20) }).parse(request.params);
+    // `pairs` is a query parameter; reading it from the path meant `?pairs=` was
+    // silently ignored and the queue was always 20 long.
+    const params = z.object({ eventId: Id }).parse(request.params);
+    const query = z.object({ pairs: z.coerce.number().int().min(1).max(200).default(20) }).parse(request.query);
     const eventId = eventIdOf(services, params.eventId);
     if (request.ctx.user === null) throw errors.unauthenticated();
     const judge = services.judges.findByUser(eventId, request.ctx.user.id);
     if (judge === null) throw errors.forbidden('You are not on this event\'s judging panel.');
     requirePermission(services, request.ctx, 'pairwise', 'read', { assignedJudge: true }, { eventId, resourceType: 'judge', resourceId: judge.id });
-    return services.scoring.pairwiseQueue(eventId, judge.id, params.pairs, ctx(request));
+    return services.scoring.pairwiseQueue(eventId, judge.id, query.pairs, ctx(request));
   });
   registry.register({
     method: 'GET', path: '/api/events/{eventId}/pairwise/queue', tags: ['scoring'], auth: 'session',
@@ -1266,12 +1273,23 @@ export function registerCommunityRoutes(app: FastifyInstance, services: Services
   });
 
   app.get('/api/submissions/:submissionId/comments', async (request) => {
-    const params = z.object({ submissionId: Id }).merge(Paging).parse(request.params);
+    /*
+     * Paging is read from the query. It used to be merged into the *path*
+     * schema, where those keys can never appear, so the defaults always won:
+     * every caller got the first 25 comments and there was no way to ask for
+     * the rest. A project with a long thread simply had no accessible tail.
+     */
+    const params = z.object({ submissionId: Id }).parse(request.params);
+    const query = z.object({}).merge(Paging).parse(request.query);
     const submission = services.submissions.require(params.submissionId);
-    const paging = normalisePaging(params);
+    const paging = normalisePaging(query);
     return services.community.listComments(submission.event_id, submission.id, { limit: paging.limit, offset: paging.offset, includeHidden: canManageEvent(request.ctx.actor, submission.event_id) }, ctx(request));
   });
-  registry.register({ method: 'GET', path: '/api/submissions/{submissionId}/comments', tags: ['community'], auth: 'none', summary: 'Comments on a project.' });
+  registry.register({
+    method: 'GET', path: '/api/submissions/{submissionId}/comments', tags: ['community'], auth: 'none',
+    summary: 'Comments on a project.',
+    description: 'Paged with `page` and `perPage`. Hidden comments are included only for organizers.',
+  });
 
   app.post('/api/submissions/:submissionId/comments', async (request, reply) => {
     const params = z.object({ submissionId: Id }).parse(request.params);
@@ -1395,10 +1413,14 @@ export function registerWebhookRoutes(app: FastifyInstance, services: Services, 
   registry.register({ method: 'GET', path: '/api/events/{eventId}/webhooks', tags: ['webhooks'], auth: 'organizer', summary: 'List webhooks and their recent delivery status.', permission: { resource: 'webhook', action: 'read' } });
 
   app.get('/api/webhooks/:webhookId/deliveries', async (request) => {
-    const params = z.object({ webhookId: Id, limit: z.coerce.number().int().min(1).max(500).default(50) }).parse(request.params);
+    // `limit` is a query parameter; read from the path it was always the default
+    // 50, so an organizer debugging a failing receiver could not ask for more
+    // history than the last 50 attempts.
+    const params = z.object({ webhookId: Id }).parse(request.params);
+    const query = z.object({ limit: z.coerce.number().int().min(1).max(500).default(50) }).parse(request.query);
     const webhook = services.webhooks.require(params.webhookId);
     requirePermission(services, request.ctx, 'webhook', 'read', { inOrganizedEvent: canManageEvent(request.ctx.actor, webhook.event_id) }, { eventId: webhook.event_id, resourceType: 'webhook' });
-    return { data: services.webhooks.deliveries(webhook.id, params.limit, ctx(request)) };
+    return { data: services.webhooks.deliveries(webhook.id, query.limit, ctx(request)) };
   });
   registry.register({ method: 'GET', path: '/api/webhooks/{webhookId}/deliveries', tags: ['webhooks'], auth: 'organizer', summary: 'Delivery history with responses and errors.', permission: { resource: 'webhook', action: 'read' } });
 

@@ -20,9 +20,13 @@ try {
         `Database: ${config.databaseFile}\n`,
     );
   }
-  const problems = db.all<{ name: string }>("PRAGMA foreign_key_check");
+  const problems = db.foreignKeyViolations();
   if (problems.length > 0) {
     process.stderr.write(`Foreign key violations found: ${problems.length}\n`);
+    for (const problem of problems.slice(0, 10)) {
+      process.stderr.write(`  ${problem.table} row ${String(problem.rowid)} has no matching ${problem.parent}\n`);
+    }
+    if (problems.length > 10) process.stderr.write(`  ... and ${String(problems.length - 10)} more\n`);
     process.exitCode = 1;
   }
 } catch (error) {
