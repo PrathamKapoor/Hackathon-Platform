@@ -501,10 +501,21 @@ export function registerGalleryRoutes(app: FastifyInstance, services: Services, 
   app.get('/api/embed/:eventId.json', async (request, reply) => {
     const params = z.object({ eventId: Id, limit: z.coerce.number().int().min(1).max(200).default(24) }).parse(request.params);
     const payload = services.gallery.embedPayload(eventIdOf(services, params.eventId), params.limit, ctx(request));
+    /*
+     * The content type is stated rather than left to Fastify.
+     *
+     * `.send(JSON.stringify(payload))` sends a *string*, and Fastify labels a
+     * string body `text/plain; charset=utf-8`. The payload was correct JSON but
+     * the endpoint — whose entire purpose is to be consumed by another site's
+     * script — was served as text, so a consumer's `response.json()` threw and
+     * the embed silently rendered nothing. Returning the object lets Fastify
+     * serialise it as `application/json`.
+     */
     return reply
+      .header('content-type', 'application/json; charset=utf-8')
       .header('access-control-allow-origin', '*')
       .header('cache-control', 'public, max-age=60')
-      .send(JSON.stringify(payload));
+      .send(payload);
   });
   registry.register({
     method: 'GET', path: '/api/embed/{eventId}.json', tags: ['submissions'], auth: 'none',

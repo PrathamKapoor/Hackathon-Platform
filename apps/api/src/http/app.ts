@@ -176,9 +176,16 @@ export async function buildApp(options: BuildOptions = {}): Promise<BuiltApp> {
      * advertised a year of HTTPS-only for an origin that is served over http.
      * Browsers ignore HSTS received over plain http anyway, so this is about not
      * making a false claim rather than about preventing a break.
+     *
+     * The protocol is read off a parsed URL rather than by matching a scheme
+     * prefix, partly to reuse the value the config validator already proved
+     * parseable and partly because `apps/api/test/offline.test.ts` fails any
+     * entrypoint containing a URL literal outside loopback. That guard is right
+     * — a remote URL in an entrypoint is exactly what it exists to catch — so
+     * the code bends rather than the guard.
      */
     hsts:
-      config.env === 'production' && config.publicUrl.startsWith('https://')
+      config.env === 'production' && new URL(config.publicUrl).protocol === 'https:'
         ? { maxAge: 31_536_000, includeSubDomains: true }
         : false,
   });

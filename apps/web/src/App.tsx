@@ -21,6 +21,9 @@ import { ReviewPage } from './pages/ReviewPage.tsx';
 import { PairwisePage } from './pages/PairwisePage.tsx';
 import { OrganizerPage } from './pages/OrganizerPage.tsx';
 import { WorkspacePage } from './pages/WorkspacePage.tsx';
+import { ProjectPage } from './pages/ProjectPage.tsx';
+import { CertificatePage } from './pages/CertificatePage.tsx';
+import { InvitePage } from './pages/InvitePage.tsx';
 
 function TopBar() {
   const session = useSession();
@@ -253,6 +256,23 @@ export function App() {
         <Route path="/e/:slugOrId" element={<EventScoped>{(id) => <EventPage eventRef={id} />}</EventScoped>} />
         <Route path="/e/:slugOrId/results" element={<EventScoped>{(id) => <ResultsPage eventRef={id} />}</EventScoped>} />
         <Route path="/e/:slugOrId/gallery" element={<EventScoped>{(id) => <GalleryPage eventRef={id} />}</EventScoped>} />
+        {/*
+          These three existed only as links.
+
+          `/e/:slug/projects/:projectSlug` is what every gallery card pointed at
+          and `/certificates/:reference` is what the API hands an organizer to
+          forward to a team. Neither had a matching route, so both were 404s.
+          `/invite/:code` came from the team-invitation response and was the
+          third. A gallery you cannot open, a certificate nobody can check, and
+          an invitation that cannot be accepted are all the same defect: the
+          URL exists in the product but not in the router.
+        */}
+        <Route
+          path="/e/:slugOrId/projects/:projectSlug"
+          element={<EventScoped>{(id) => <ProjectPage eventRef={id} />}</EventScoped>}
+        />
+        <Route path="/certificates/:reference" element={<CertificatePage />} />
+        <Route path="/invite/:code" element={<InvitePage />} />
         <Route path="*" element={<NotFound />} />
       </Routes>
     </Page>

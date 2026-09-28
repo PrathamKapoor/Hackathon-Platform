@@ -206,7 +206,12 @@ export class GalleryService {
         name: row.project_name,
         summary: row.short_description,
         technologies: safeArray(row.technologies),
-        url: `${this.config_publicUrl(ctx)}/events/${event.slug}/projects/${row.slug}`,
+        // `/e/:slug/projects/:slug` is the SPA's actual route. This used to
+        // emit `/events/${slug}/projects/${slug}`, which no route matched, so
+        // every project URL handed to an embeddable widget pointed at the app's
+        // 404. It has to match the router in apps/web/src/App.tsx exactly, so a
+        // change to either is a change to both.
+        url: `${this.config_publicUrl(ctx)}/e/${event.slug}/projects/${row.slug}`,
         repositoryUrl: row.repository_url,
         demoUrl: row.demo_url,
         imageUrl: row.cover_image_url ? `${this.config_publicUrl(ctx)}/api/uploads/${row.cover_image_url.replace(/^.*\//, '')}` : null,

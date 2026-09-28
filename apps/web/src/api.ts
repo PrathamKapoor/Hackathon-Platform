@@ -219,9 +219,25 @@ export type GalleryProjectDetail = GalleryCard & {
   team: (NonNullable<GalleryCard['team']> & { id: string; description: string; organization: string | null }) | null;
   track: (NonNullable<GalleryCard['track']> & { id: string }) | null;
   members: { displayName: string; username: string; role: string }[];
-  screenshots: { url: string; caption: string | null; order: number }[];
-  /** Whether per-viewer vote counts are hidden, per the event's voting rules. */
-  votes: { hidden: boolean };
+  /**
+   * `{ id, url, width, height }` — the upload id IS the key the route uses to
+   * build `/api/uploads/{id}`. The previous declaration here said
+   * `{ url, caption, order }`, which does not exist on this payload.
+   */
+  screenshots: { id: string; url: string; width: number | null; height: number | null }[];
+  /**
+   * Vote state as the *gallery* sees it, which is not the same as the viewer's
+   * own vote.
+   *
+   * When the event reveals totals the server sends `{ count }`. When it does
+   * not, it sends `{ hidden: true }` and no count at all — so `count` has to be
+   * read through the discriminant rather than assumed. This type used to claim
+   * `{ hidden: boolean }`, which is a shape the server never sends.
+   *
+   * Whether *this account* has voted is a different question, answered by
+   * /votes/mine; the gallery deliberately does not answer it.
+   */
+  votes: { count: number; hidden?: false } | { hidden: true; count?: never };
 };
 
 /** Technology facets: `{ data: [{ technology, count }] }`, not `string[]`. */
