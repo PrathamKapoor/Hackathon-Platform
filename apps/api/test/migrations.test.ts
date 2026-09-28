@@ -288,6 +288,55 @@ test('editing an already-applied migration is refused', () => {
   }
 });
 
+test('the foreign key check actually finds violations', () => {
+  /*
+   * Worth testing precisely because there used to be a line in the database
+   * constructor that read like a check and was not one: the pragma was
+   * misspelled (`foreign_keys_check`) so SQLite ignored it, and it was run with
+   * `exec`, which discards the rows a check returns. A check that cannot fail
+   * is worse than no check, so this asserts the real thing finds a real
+   * violation.
+   */
+  const { file, dir: own } = scratch('fkcheck');
+  try {
+    const db = new Database(file);
+    db.migrate();
+
+    assert.deepEqual(
+      db.foreignKeyViolations(),
+      [],
+      'a freshly migrated database reported foreign key violations',
+    );
+
+    /*
+     * The violation has to be created with enforcement off, because that is
+     * exactly how one arises in practice: an older schema without the foreign
+     * key, holding rows the newer one would refuse.
+     */
+    db.run('PRAGMA foreign_keys = OFF');
+    db.exec(
+      `INSERT INTO registrations (id, event_id, user_id, state, full_name, organization, skills, bio, decision_note, submitted_at, created_at, updated_at)
+       VALUES ('reg_orphan', 'evt_does_not_exist', 'usr_does_not_exist', 'PENDING', 'Orphan', '', '', '', '', :at, :at, :at)`,
+      { at: new Date().toISOString() },
+    );
+    db.run('PRAGMA foreign_keys = ON');
+
+    const violations = db.foreignKeyViolations();
+    const tables = violations.map((violation) => violation.table);
+    assert.ok(
+      tables.includes('registrations'),
+      `the check did not find the orphaned registration. Found: ${tables.length === 0 ? '(nothing)' : tables.join(', ')}`,
+    );
+    assert.ok(
+      violations.some((violation) => violation.parent === 'events' || violation.parent === 'users'),
+      'the check did not say which parent was missing',
+    );
+    db.close();
+  } finally {
+    discard(own);
+  }
+});
+
 /* -------------------------------------------------------- backup/restore */
 
 test('a backup taken with VACUUM INTO restores into a database the app runs on', async (t) => {
