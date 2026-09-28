@@ -15,6 +15,7 @@
 import { canonicalJson, certificateReference, contentHash, sha256Hex } from '@verdict/core/integrity';
 import { newId } from '@verdict/core/ids';
 import { validatePlainText } from '@verdict/core/validation';
+import type { WebhookEvent } from '@verdict/core/types';
 import { errors } from '../lib/errors.ts';
 import { canManageEvent } from '../lib/rbac.ts';
 import type { ActorContext, Services } from './context.ts';
@@ -456,10 +457,16 @@ export class CertificateService {
 </svg>`;
   }
 
-  /** Fire the webhook without blocking; failures are logged, never thrown. */
-  private deliver(eventId: string, eventType: string, payload: Record<string, unknown>, ctx: ActorContext): void {
+  /**
+   * Fire the webhook without blocking; failures are logged, never thrown.
+   *
+   * `eventType` is a `WebhookEvent` rather than `string` on purpose: the cast
+   * that used to sit here was `as never`, which silenced the compiler entirely
+   * and would have accepted a misspelt topic that quietly never delivered.
+   */
+  private deliver(eventId: string, eventType: WebhookEvent, payload: Record<string, unknown>, ctx: ActorContext): void {
     try {
-      void this.webhooks?.dispatch(eventId, eventType as never, payload, ctx);
+      this.webhooks?.dispatch(eventId, eventType, payload, ctx);
     } catch {
       // Webhook delivery is best-effort and must never fail an issuance.
     }

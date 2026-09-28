@@ -49,11 +49,14 @@ export class TeamService {
   private readonly db: Services['db'];
   private readonly audit: Services['audit'];
   private readonly events: Services['events'];
+  /** Held for its `webhooks` entry; see the note in `create`. */
+  private readonly services: Services;
 
   constructor(services: Services) {
     this.db = services.db;
     this.audit = services.audit;
     this.events = services.events;
+    this.services = services;
   }
 
   create(
@@ -66,7 +69,7 @@ export class TeamService {
     const name = validatePlainText(input.name, { field: 'team name', min: 2, max: 100 });
     const slug = this.uniqueSlug(eventId, validateSlug(slugify(name), 'team slug'));
 
-    return this.db.transaction(() => {
+    const team = this.db.transaction(() => {
       const id = newId('team');
       this.db.exec(
         `INSERT INTO teams (id, event_id, slug, name, description, captain_id, organization, track_id, created_at, updated_at)
@@ -103,6 +106,18 @@ export class TeamService {
 
       return this.require(id);
     });
+
+    // Dispatched after the transaction commits, not inside it: `dispatch` kicks
+    // off an unawaited HTTP attempt that writes its result back to the database,
+    // and a write landing inside an open transaction would race the commit.
+    this.services.webhooks.dispatch(
+      eventId,
+      'team.created',
+      { teamId: team.id, slug: team.slug, name: team.name, trackId: team.track_id },
+      ctx,
+    );
+
+    return team;
   }
 
   update(teamId: string, patch: { name?: string; description?: string; organization?: string; trackId?: string | null }, ctx: ActorContext): TeamRow {

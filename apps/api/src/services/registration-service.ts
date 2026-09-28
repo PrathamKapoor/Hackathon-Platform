@@ -73,12 +73,19 @@ export class RegistrationService {
   private readonly audit: Services['audit'];
   private readonly events: Services['events'];
   private readonly auth: Services['auth'];
+  /**
+   * The container, held for its `webhooks` entry only. It is the same object
+   * `createServices` fills in place, so reading `webhooks` at call time always
+   * sees the real service even though it is constructed after this one.
+   */
+  private readonly services: Services;
 
   constructor(services: Services) {
     this.db = services.db;
     this.audit = services.audit;
     this.events = services.events;
     this.auth = services.auth;
+    this.services = services;
   }
 
   /* ------------------------------------------------------------ fields */
@@ -307,6 +314,19 @@ export class RegistrationService {
       metadata: { note: options.note ?? '', override: options.override === true },
       at: ctx.at,
     });
+
+    // `bulkDecide` funnels through here, so a batch of accepts is announced too.
+    // Only the acceptance is announced: a rejection has no configured topic,
+    // and inventing one late would be a breaking change for existing
+    // subscriptions.
+    if (to === 'ACCEPTED') {
+      this.services.webhooks.dispatch(
+        before.event_id,
+        'registration.accepted',
+        { registrationId, userId: before.user_id, state: to },
+        ctx,
+      );
+    }
 
     return this.require(registrationId);
   }

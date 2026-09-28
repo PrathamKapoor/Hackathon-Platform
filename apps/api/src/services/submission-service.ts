@@ -90,6 +90,8 @@ export class SubmissionService {
   private readonly events: Services['events'];
   private readonly teams: Services['teams'];
   private readonly uploads: Services['uploads'];
+  /** Held for its `webhooks` entry; see the note in `submit`. */
+  private readonly services: Services;
 
   constructor(services: Services) {
     this.db = services.db;
@@ -97,6 +99,7 @@ export class SubmissionService {
     this.events = services.events;
     this.teams = services.teams;
     this.uploads = services.uploads;
+    this.services = services;
   }
 
   /* ------------------------------------------------------------- create */
@@ -291,6 +294,22 @@ export class SubmissionService {
       });
     });
 
+    /*
+     * `submission.created` fires on the draft -> SUBMITTED change, not on
+     * `create()`. A draft is a private working copy that may never be entered,
+     * so announcing it would put projects in a receiver that were never in the
+     * contest. The draft is not an announcement anyone can act on.
+     *
+     * After the transaction, like every other dispatch here: the attempt writes
+     * its outcome back to the database and must not race the commit.
+     */
+    this.services.webhooks.dispatch(
+      before.event_id,
+      'submission.created',
+      { submissionId, teamId: before.team_id, slug: before.slug, projectName: before.project_name, trackId: before.track_id },
+      ctx,
+    );
+
     return this.require(submissionId);
   }
 
@@ -371,6 +390,15 @@ export class SubmissionService {
         at: ctx.at,
       });
     });
+
+    if (to === 'LOCKED') {
+      this.services.webhooks.dispatch(
+        before.event_id,
+        'submission.locked',
+        { submissionId, teamId: before.team_id, slug: before.slug, projectName: before.project_name, state: to },
+        ctx,
+      );
+    }
 
     return this.require(submissionId);
   }

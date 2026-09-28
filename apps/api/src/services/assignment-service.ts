@@ -62,6 +62,8 @@ export class AssignmentService {
   private readonly events: Services['events'];
   private readonly judges: Services['judges'];
   private readonly submissions: Services['submissions'];
+  /** Held for its `webhooks` entry; see the note in `commit`. */
+  private readonly services: Services;
 
   constructor(services: Services) {
     this.db = services.db;
@@ -69,6 +71,7 @@ export class AssignmentService {
     this.events = services.events;
     this.judges = services.judges;
     this.submissions = services.submissions;
+    this.services = services;
   }
 
   /** Current committed assignment version for an event. */
@@ -337,6 +340,34 @@ export class AssignmentService {
         at: ctx.at,
       });
     });
+
+    /*
+     * Counts and the seed, never the plan itself. A committed plan is one row
+     * per judge per project, which for a large event is thousands of ids - the
+     * kind of payload that silently blows past a receiver's body limit and gets
+     * retried five times. A receiver that needs the detail reads the plan from
+     * the API, which is also the versioned, audited copy.
+     */
+    this.services.webhooks.dispatch(
+      eventId,
+      'judge.assigned',
+      {
+        version,
+        strategy: input.strategy,
+        created,
+        skipped,
+        reviewsPerProject: preview.reviewsPerProject,
+        totalPairs: preview.summary.totalPairs,
+        judgesUsed: preview.summary.judgesUsed,
+        projectsFullyCovered: preview.summary.projectsFullyCovered,
+        projectsPartiallyCovered: preview.summary.projectsPartiallyCovered,
+        projectsUncovered: preview.summary.projectsUncovered,
+        coverageRatio: preview.summary.coverageRatio,
+        loadSpread: preview.summary.loadSpread,
+        warnings: preview.summary.warnings.length,
+      },
+      ctx,
+    );
 
     return { version, created, skipped, preview };
   }

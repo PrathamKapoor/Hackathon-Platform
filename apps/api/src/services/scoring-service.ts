@@ -66,6 +66,8 @@ export class ScoringService {
   private readonly rubrics: Services['rubrics'];
   private readonly assignments: Services['assignments'];
   private readonly judges: Services['judges'];
+  /** Held for its `webhooks` entry; see the note in `submitReview`. */
+  private readonly services: Services;
 
   constructor(services: Services) {
     this.db = services.db;
@@ -74,6 +76,7 @@ export class ScoringService {
     this.rubrics = services.rubrics;
     this.assignments = services.assignments;
     this.judges = services.judges;
+    this.services = services;
   }
 
   /* ------------------------------------------------------ judge queue */
@@ -306,7 +309,63 @@ export class ScoringService {
     });
 
     this.judges.autoCompleteFinishedJudges(assignment.event_id, ctx.at);
+
+    /*
+     * Counts only. The per-criterion scores stay in the database: a webhook body
+     * is written to a third party's log the moment it is sent, and no receiver
+     * needs a judge's individual 0-10s to advance a progress bar.
+     */
+    this.services.webhooks.dispatch(
+      assignment.event_id,
+      'score.submitted',
+      {
+        assignmentId,
+        submissionId: assignment.submission_id,
+        judgeId: actor.id,
+        rubricVersionId: saved.rubric_version_id,
+        durationMs: input.durationMs ?? null,
+      },
+      ctx,
+    );
+
+    this.dispatchJudgingCompleted(assignment.event_id, ctx);
+
     return this.requireScore(saved.id);
+  }
+
+  /**
+   * Announce that judging is done, at most once per event.
+   *
+   * Derived rather than flagged: it fires from inside the last submit, and a
+   * submit is only reachable while that review is still outstanding, so reaching
+   * this point with nothing outstanding can only mean this submission was the
+   * one that finished it. A stored "already announced" flag would need its own
+   * reset path when a judge is reassigned, which is a bug waiting to happen.
+   */
+  private dispatchJudgingCompleted(eventId: string, ctx: ActorContext): void {
+    const total = this.db.value<number>(
+      "SELECT COUNT(*) AS c FROM judge_assignments WHERE event_id = :e AND status <> 'REASSIGNED'",
+      { e: eventId },
+    ) ?? 0;
+    // An event with no panel at all has not completed judging; it never started.
+    if (total === 0) return;
+
+    const outstanding = this.db.value<number>(
+      `SELECT COUNT(*) AS c
+       FROM judge_assignments a
+       LEFT JOIN scores sc ON sc.assignment_id = a.id
+       WHERE a.event_id = :e AND a.status <> 'REASSIGNED'
+         AND (sc.id IS NULL OR sc.state NOT IN ('SUBMITTED','LOCKED'))`,
+      { e: eventId },
+    ) ?? 0;
+    if (outstanding > 0) return;
+
+    this.services.webhooks.dispatch(
+      eventId,
+      'judging.completed',
+      { assignments: total, outstanding: 0 },
+      ctx,
+    );
   }
 
   /**

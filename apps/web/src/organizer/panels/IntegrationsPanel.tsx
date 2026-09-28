@@ -8,12 +8,16 @@ import {
   type WebhookRow,
 } from '../../api.ts';
 import { Empty, formatInstant, shortHash, stateLabel, useApi } from '../../ui.tsx';
+import { WEBHOOK_EVENT_META, type WebhookEvent } from '@verdict/core/types';
 import { Panel } from '../Console.tsx';
 
 const EXPORT_KINDS = [
   'REGISTRATIONS', 'PARTICIPANTS', 'TEAMS', 'SUBMISSIONS', 'JUDGES',
   'ASSIGNMENTS', 'SCORES', 'RESULTS', 'VOTES', 'COMMENTS', 'ANOMALIES', 'WEBHOOKS', 'AUDIT',
 ] as const;
+
+/** Every topic the dispatcher can actually deliver, in the order shown. */
+const WEBHOOK_TOPICS = Object.keys(WEBHOOK_EVENT_META) as readonly WebhookEvent[];
 
 /**
  * Integrations: webhooks, certificates, import and export.
@@ -73,7 +77,7 @@ function Webhooks({ eventId, error, setError, busy, setBusy }: { eventId: string
   const { data, reload } = useApi<{ data: WebhookRow[] }>(`/api/events/${eventId}/webhooks`);
   const [url, setUrl] = useState('');
   const [secret, setSecret] = useState('');
-  const [events, setEvents] = useState<string[]>(['results.published']);
+  const [events, setEvents] = useState<WebhookEvent[]>(['results.published']);
   const [deliveries, setDeliveries] = useState<{ id: string; webhookId: string } | null>(null);
 
   const { data: deliveryRows } = useApi<{ data: Record<string, unknown>[] }>(
@@ -92,11 +96,6 @@ function Webhooks({ eventId, error, setError, busy, setBusy }: { eventId: string
       setBusy(false);
     }
   };
-
-  const ALL_EVENTS = [
-    'results.published', 'results.finalized', 'result.corrected', 'score.submitted',
-    'judging.completed', 'submission.locked', 'registration.decided', 'certificate.generated',
-  ];
 
   return (
     <>
@@ -137,9 +136,23 @@ function Webhooks({ eventId, error, setError, busy, setBusy }: { eventId: string
 
         <fieldset className="criterion" style={{ marginBottom: 16 }}>
           <legend className="label">Subscribe to</legend>
+          {/*
+            Rendered from the server's own topic list rather than a local copy.
+            The list used to be hard-coded here and had drifted: it offered
+            `result.corrected` and `registration.decided`, neither of which is a
+            real topic. The server filters unrecognised topics out of a
+            subscription without complaining, so an organizer who ticked both
+            got a webhook subscribed to fewer events than the console said, and
+            no error to explain why nothing arrived.
+          */}
           <div className="row row--wrap" style={{ gap: 12 }}>
-            {ALL_EVENTS.map((name) => (
-              <label key={name} className="row small" style={{ gap: 6 }}>
+            {WEBHOOK_TOPICS.map((name) => (
+              <label
+                key={name}
+                className="row small"
+                style={{ gap: 6, alignItems: 'flex-start', flex: '1 1 260px' }}
+                title={WEBHOOK_EVENT_META[name].description}
+              >
                 <input
                   type="checkbox"
                   checked={events.includes(name)}
@@ -149,7 +162,12 @@ function Webhooks({ eventId, error, setError, busy, setBusy }: { eventId: string
                     )
                   }
                 />
-                <span className="mono tiny">{name}</span>
+                <span>
+                  <span className="mono tiny">{name}</span>
+                  <span className="muted" style={{ display: 'block' }}>
+                    {WEBHOOK_EVENT_META[name].label}
+                  </span>
+                </span>
               </label>
             ))}
           </div>

@@ -74,6 +74,8 @@ export class ResultService {
   private readonly events: Services['events'];
   private readonly rubrics: Services['rubrics'];
   private readonly assignments: Services['assignments'];
+  /** Held for its `webhooks` entry; see the note in `finalize`. */
+  private readonly services: Services;
 
   constructor(services: Services) {
     this.db = services.db;
@@ -81,6 +83,7 @@ export class ResultService {
     this.events = services.events;
     this.rubrics = services.rubrics;
     this.assignments = services.assignments;
+    this.services = services;
   }
 
   /* =================================================== the computation */
@@ -303,6 +306,32 @@ export class ResultService {
       at: ctx.at,
     });
 
+    /*
+     * The integrity hash and the shape of the run, not the standings. A
+     * hundred-project board is a body no receiver needs, and the hash is the
+     * part worth having: a receiver can pin it and prove later that the result
+     * it saw is the one this run produced.
+     */
+    this.services.webhooks.dispatch(
+      eventId,
+      'results.finalized',
+      {
+        runId: run.id,
+        rubricVersionId: run.rubricVersionId,
+        assignmentVersion: run.assignmentVersion,
+        engineVersion: run.engineVersion,
+        inputHash: run.provenance.inputHash,
+        integrityHash: run.integrityHash,
+        entries: run.entries.length,
+        prizes: run.prizes.length,
+        normalization: run.normalization.method,
+        aggregation: run.aggregation.method,
+        confidence: run.diagnostics.confidence,
+        warnings: run.diagnostics.warnings.length,
+      },
+      ctx,
+    );
+
     return this.requireRun(run.id);
   }
 
@@ -465,6 +494,27 @@ export class ResultService {
         at: ctx.at,
       });
     });
+
+    // The snapshot row carries no rubric or assignment version; both live on the
+    // run it froze, and a receiver pinning "this is the result for rubric v3,
+    // assignment v5" needs them.
+    const publishedRun = this.requireRun(snapshot.result_run_id);
+    this.services.webhooks.dispatch(
+      eventId,
+      'results.published',
+      {
+        snapshotId,
+        runId: snapshot.result_run_id,
+        integrityHash: snapshot.integrity_hash,
+        entryCount: snapshot.entry_count,
+        reference: verificationCode(snapshot.integrity_hash, 2, 5),
+        rubricVersionId: publishedRun.rubric_version_id,
+        assignmentVersion: publishedRun.assignment_version,
+        isCorrection: snapshot.is_correction === 1,
+        supersedesId: snapshot.supersedes_id,
+      },
+      ctx,
+    );
 
     return this.requireSnapshot(snapshotId);
   }

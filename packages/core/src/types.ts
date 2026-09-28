@@ -214,20 +214,64 @@ export type AuditAction = (typeof AUDIT_ACTIONS)[number];
 
 /* ------------------------------------------------------- webhook topics */
 
-export const WEBHOOK_EVENTS = [
-  'event.created',
-  'registration.accepted',
-  'team.created',
-  'submission.created',
-  'submission.locked',
-  'judge.assigned',
-  'score.submitted',
-  'judging.completed',
-  'results.finalized',
-  'results.published',
-  'certificate.generated',
-] as const;
-export type WebhookEvent = (typeof WEBHOOK_EVENTS)[number];
+/**
+ * Every webhook topic, with the wording the organizer console shows.
+ *
+ * The map is the source of truth and the array is derived from it, so a topic
+ * cannot exist without a label and the UI cannot offer a topic the dispatcher
+ * does not know. The server filters unrecognised topics out of a subscription
+ * silently, so a hard-coded list anywhere would quietly drop events.
+ *
+ * There is deliberately no `event.created` topic. A webhook belongs to an
+ * event, so the event a subscription would name does not exist yet at the
+ * moment it is created; the topic could never deliver. It was in the list
+ * before, where it read as a working feature and never fired.
+ */
+export const WEBHOOK_EVENT_META = {
+  'registration.accepted': {
+    label: 'Registration accepted',
+    description: 'An application was accepted, including a bulk decision that accepts it.',
+  },
+  'team.created': {
+    label: 'Team created',
+    description: 'A team was created in the event.',
+  },
+  'submission.created': {
+    label: 'Project submitted',
+    description: 'A project was submitted into the contest. Fires on the draft-to-submitted change, not when an empty draft is created, so a receiver never counts a project that was never entered.',
+  },
+  'submission.locked': {
+    label: 'Submission locked',
+    description: 'A submission was locked, either individually or by the whole event.',
+  },
+  'judge.assigned': {
+    label: 'Assignment plan committed',
+    description: 'A judge assignment plan was committed. The payload carries the counts, not the full plan.',
+  },
+  'score.submitted': {
+    label: 'Review submitted',
+    description: 'A judge submitted a review. The payload never carries the scores themselves.',
+  },
+  'judging.completed': {
+    label: 'Judging completed',
+    description: 'Every review for the event has been submitted. Fires once, on the last one.',
+  },
+  'results.finalized': {
+    label: 'Result finalized',
+    description: 'A result run was finalized, with its integrity hash.',
+  },
+  'results.published': {
+    label: 'Results published',
+    description: 'A finalized result was published to the public board.',
+  },
+  'certificate.generated': {
+    label: 'Certificate issued',
+    description: 'A certificate was issued or revoked.',
+  },
+} as const satisfies Record<string, { label: string; description: string }>;
+
+export type WebhookEvent = keyof typeof WEBHOOK_EVENT_META;
+export const WEBHOOK_EVENTS = Object.keys(WEBHOOK_EVENT_META) as readonly WebhookEvent[];
 
 /* -------------------------------------------------------------- helpers */
 
