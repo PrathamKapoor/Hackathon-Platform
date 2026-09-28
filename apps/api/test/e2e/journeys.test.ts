@@ -317,24 +317,28 @@ describe('browser: judge', { skip }, () => {
     await h.shot(page, 'judge-review-filled');
 
     await page.getByRole('button', { name: /submit review/i }).click();
-    // Submitting returns the judge to their queue.
-    await page.waitForURL(/\/judge$/, { timeout: 20_000 });
     /*
-     * Wait for the queue itself, not just the URL.
-     *
-     * The navigation resolves as soon as the route matches, which is before the
-     * queue request has returned, so the page is still showing "Loading your
-     * queue…" at this point. Asserting against the body then read a loading
-     * state and failed for a submission that had in fact succeeded.
+     * Submitting moves the judge on: to the next project in the queue when there
+     * is one, otherwise to the queue itself. Both are correct, so the assertion
+     * accepts either rather than pinning the old "always back to the queue"
+     * behaviour that made a judge working a list navigate for their next item.
      */
-    await page.waitForSelector('text=/\\d+ assigned/', { timeout: 20_000 });
-    const queueText = (await page.textContent('body')) ?? '';
-    assert.match(queueText, /assigned/i, 'the queue did not render its progress line');
-    assert.match(
-      queueText,
-      /submitted|in progress/i,
-      'the queue did not reflect the submission it just made',
-    );
+    await page.waitForURL(/\/judge(\/asg_[^/]*)?$/, { timeout: 25_000 });
+
+    if (/\/judge\/asg_/.test(page.url())) {
+      // Landed on the next review: the form has to be usable straight away.
+      await page.waitForSelector('[data-criterion]', { timeout: 20_000 });
+    } else {
+      // Landed on the queue.
+      await page.waitForSelector('text=/\\d+ assigned/', { timeout: 20_000 });
+      const queueText = (await page.textContent('body')) ?? '';
+      assert.match(queueText, /assigned/i, 'the queue did not render its progress line');
+      assert.match(
+        queueText,
+        /submitted|in progress/i,
+        'the queue did not reflect the submission it just made',
+      );
+    }
   });
 
   test('a judge can record a head-to-head comparison', async () => {

@@ -540,6 +540,27 @@ table.data td.num { text-align: right; font-variant-numeric: tabular-nums; font-
   .hero { padding: var(--space-6) var(--space-4); }
 }
 
+/* ---------------------------------------------------------- judge review */
+
+/* Previous/next queue navigation plus the position readout, so a judge working a
+   list never has to go back to the queue to find the next project. */
+.review-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  padding: var(--space-2) 0;
+}
+
+.review-nav > * { min-width: 0; }
+.review-nav .button { max-width: 45%; overflow: hidden; text-overflow: ellipsis; }
+
+@media (max-width: 720px) {
+  .review-nav { flex-direction: column; align-items: stretch; }
+  .review-nav .button { max-width: 100%; }
+}
+
 /* ------------------------------------------------- organizer console */
 
 .console__head { margin-bottom: var(--space-5); align-items: flex-end; }
