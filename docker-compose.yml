@@ -28,7 +28,7 @@ services:
       SESSION_SECURE_COOKIES: ${SESSION_SECURE_COOKIES:-false}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       LOG_PRETTY: ${LOG_PRETTY:-false}
-      AUTO_MIGRATE: "true"
+      AUTO_MIGRATE: ${AUTO_MIGRATE:-true}
       AUTO_SEED: ${AUTO_SEED:-true}
       TRUST_PROXY: ${TRUST_PROXY:-false}
     volumes:
@@ -38,15 +38,26 @@ services:
       # setups), which fails in ways that look like data corruption.
       - verdict-data:/data
     healthcheck:
+      # /api/ready, not /api/health. /api/health returns 200 even with a corrupt
+      # database (body `status: "degraded"`), which is right for liveness but
+      # wrong for orchestration: a container that cannot query its own data would
+      # be reported healthy, never restarted, and would keep receiving traffic.
+      # /api/ready returns 503 until migrations have run and the database answers.
       test:
         - CMD
         - node
         - -e
-        - "fetch('http://127.0.0.1:8080/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+        - "fetch('http://127.0.0.1:8080/api/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 20s
+      start_period: 30s
+    # The app drains in-flight requests and closes SQLite cleanly on SIGTERM,
+    # with its own 10s force-exit timer (SHUTDOWN_GRACE_MS in server.ts). Docker's
+    # default 10s stop grace equals that exactly, so the two race and the
+    # container is usually SIGKILLed mid-checkpoint. 20s gives the app room to
+    # finish its own shutdown on its own terms.
+    stop_grace_period: 20s
     # A single SQLite writer does not benefit from being scaled horizontally, and
     # scaling it out would break the WAL locking the whole integrity story rests
     # on. One container, one volume, one database file.

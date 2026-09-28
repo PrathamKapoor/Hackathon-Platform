@@ -105,14 +105,82 @@ export async function buildApp(options: BuildOptions = {}): Promise<BuiltApp> {
   await app.register(cookie, { secret: config.session.secret });
 
   await app.register(helmet, {
-    // The API serves JSON; the SPA is same-origin. A strict CSP here would be
-    // correct but the static handler below sets the real policy.
-    contentSecurityPolicy: false,
+    /*
+     * A real Content-Security-Policy, applied to every response.
+     *
+     * This used to be `contentSecurityPolicy: false`, justified by a comment
+     * claiming "the static handler below sets the real policy". The static
+     * handler did not set one: it emitted only `x-content-type-options`,
+     * `referrer-policy` and `cache-control`. So the platform shipped with no CSP
+     * at all, which for a page that renders user-submitted text (project names,
+     * comments, team names) means the one header that would contain a stored
+     * XSS was simply absent. A comment describing a mitigation is not a
+     * mitigation.
+     *
+     * The policy is what this application actually needs, and nothing more:
+     *
+     *   script-src 'self'   the bundle is a plain external module. No CDN, no
+     *                       inline script (React ships none), and therefore no
+     *                       'unsafe-inline' and no 'unsafe-eval'. The one inline
+     *                       script tag in index.html is the module entry point,
+     *                       which is a src=, not an inline body.
+     *   style-src 'unsafe-inline'  genuinely required: React `style={{...}}`
+     *                       attributes are used throughout the app for layout.
+     *                       They are style attributes, not <style> blocks, and
+     *                       there is no way to hash them at build time. This
+     *                       does not permit script execution.
+     *   img-src data: blob: the favicon is an inline SVG data URI, and pasted
+     *                       screenshots may be previews before upload.
+     *   object-src 'none', base-uri 'self', form-action 'self'  close the
+     *                       classic plugin/`<base>`/form-hijack vectors.
+     *
+     * `frame-ancestors 'self'` is deliberate. The "embeddable widget" is JSON
+     * at /api/embed/{eventId}.json fetched cross-origin by the host page, not an
+     * iframe we host — so there is nothing to frame, and same-origin is the
+     * correct, stricter answer. The old comment here said the opposite while
+     * `frameguard: { action: 'sameorigin' }` was already enforcing it.
+     *
+     * `upgrade-insecure-requests` is deliberately absent: this is a
+     * self-hosted platform that is frequently run on plain http://localhost,
+     * and that directive would rewrite every asset URL to https and break it.
+     */
+    contentSecurityPolicy: {
+      useDefaults: false,
+      directives: {
+        'default-src': ["'self'"],
+        'script-src': ["'self'"],
+        'style-src': ["'self'", "'unsafe-inline'"],
+        'img-src': ["'self'", 'data:', 'blob:'],
+        'font-src': ["'self'"],
+        'connect-src': ["'self'"],
+        'object-src': ["'none'"],
+        'base-uri': ["'self'"],
+        'form-action': ["'self'"],
+        'frame-ancestors': ["'self'"],
+        'manifest-src': ["'self'"],
+        'media-src': ["'self'"],
+        'worker-src': ["'self'", 'blob:'],
+      },
+    },
+    // Nothing here is a cross-origin isolation case: no SharedArrayBuffer, no
+    // `document.domain`, and the Grainient WebGL canvas needs neither.
     crossOriginEmbedderPolicy: false,
-    // Allow the embeddable widget to be framed by external event sites.
+    // Matches `frame-ancestors 'self'` above. The previous comment claimed this
+    // allowed external framing, which this setting does not and should not do.
     frameguard: { action: 'sameorigin' },
     referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
-    hsts: config.env === 'production' ? { maxAge: 31_536_000, includeSubDomains: true } : false,
+    /*
+     * HSTS is a promise to a browser that this origin is HTTPS-only, so it is
+     * gated on PUBLIC_URL actually being https. Gating it on NODE_ENV instead
+     * meant a bare `docker run` with NODE_ENV=production and a localhost PUBLIC_URL
+     * advertised a year of HTTPS-only for an origin that is served over http.
+     * Browsers ignore HSTS received over plain http anyway, so this is about not
+     * making a false claim rather than about preventing a break.
+     */
+    hsts:
+      config.env === 'production' && config.publicUrl.startsWith('https://')
+        ? { maxAge: 31_536_000, includeSubDomains: true }
+        : false,
   });
 
   await app.register(multipart, {

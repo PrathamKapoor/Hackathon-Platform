@@ -564,14 +564,61 @@ export class SubmissionService {
 
   /* ---------------------------------------------------------- guards */
 
-  /** Server-authoritative edit gate. */
-  assertEditable(submission: SubmissionRow, actor: { id: string; roles: string[]; eventIds: string[] }, ctx: ActorContext): void {
-    this.assertOwner(submission, actor, ctx);
-    if (canManageEvent(actor as never, submission.event_id)) return;
+  /**
+   * Whether this actor could edit this submission right now, and why not.
+   *
+   * This is the read-side twin of `assertEditable`: the same ownership, state
+   * and deadline facts, but answering with a value instead of a throw. The
+   * participant form uses it to disable its inputs and explain why, so the
+   * client never has to re-derive a server rule (and never disagrees with one).
+   */
+  canEdit(
+    submission: SubmissionRow,
+    actor: { id: string; roles: string[]; eventIds: string[] } | null,
+    ctx: ActorContext,
+  ): { editable: boolean; reason: string | null } {
+    if (actor === null) return { editable: false, reason: 'Sign in to edit this project.' };
+
+    const isOwner =
+      submission.created_by === actor.id ||
+      (submission.team_id !== null && this.teams.member(submission.team_id, actor.id) !== null);
+    const isManager = canManageEvent(actor as never, submission.event_id);
+
+    if (!isOwner && !isManager) {
+      return { editable: false, reason: 'Only the project owner, a team member, or an organizer can change this submission.' };
+    }
+
+    if (submission.state === 'LOCKED' || submission.state === 'FINALIZED') {
+      return { editable: false, reason: `This project is ${submission.state.toLowerCase()} and can no longer be edited.` };
+    }
+
+    if (isManager) return { editable: true, reason: null };
 
     const event = this.events.require(submission.event_id);
-    if (!this.events.isFrozen(event, ctx.at)) return;
+    if (!this.events.isFrozen(event, ctx.at)) return { editable: true, reason: null };
 
+    const deadline = event.submission_closes_at ?? 'the submission deadline';
+    return {
+      editable: false,
+      reason: `The submission deadline (${deadline}) has passed and the project set is frozen. An organizer can apply an audited override.`,
+    };
+  }
+
+  /** Server-authoritative edit gate. */
+  assertEditable(submission: SubmissionRow, actor: { id: string; roles: string[]; eventIds: string[] }, ctx: ActorContext): void {
+    const verdict = this.canEdit(submission, actor, ctx);
+    if (verdict.editable) return;
+    // Ownership failures are a 403 and are worth an audit row; a closed window is
+    // a 409 and is not. `canEdit` deliberately does not decide which, so the
+    // original split is preserved here rather than collapsed.
+    if (verdict.reason?.startsWith('Only the project owner') === true) {
+      this.assertOwner(submission, actor, ctx);
+      return;
+    }
+    if (verdict.reason?.startsWith('This project is') === true) {
+      throw errors.immutable(verdict.reason);
+    }
+    const event = this.events.require(submission.event_id);
     const deadline = event.submission_closes_at ?? 'the submission deadline';
     throw errors.deadlinePassed(
       `"${submission.project_name}" can no longer be edited: ${deadline} has passed and the project set for "${event.name}" is frozen. ` +

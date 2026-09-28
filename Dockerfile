@@ -40,12 +40,13 @@ RUN npm prune --omit=dev
 FROM node:24-bookworm-slim AS runtime
 WORKDIR /app
 
-# `tini` reaps zombies and forwards signals. Without an init process, PID 1 is
-# Node, which ignores SIGTERM by default and turns every deploy into a
-# ten-second timeout and a kill.
+# `tini` is PID 1 and Node is its child. tini forwards SIGTERM to the process
+# group and reaps zombies, so `docker compose down` reaches the graceful drain
+# in `server.ts` (which needs more than the 10s Docker would allow by default —
+# see `stop_grace_period` in docker-compose.yml) instead of being SIGKILLed.
 RUN apt-get update \
- && apt-get install --no-install-recommends --yes tini ca-certificates \
- && rm -rf /var/lib/apt/lists/*
+  && apt-get install --no-install-recommends --yes tini ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
 
 ENV NODE_ENV=production \
     HOST=0.0.0.0 \
@@ -69,10 +70,17 @@ VOLUME ["/data"]
 USER node
 EXPOSE 8080
 
-# The health endpoint answers even when the database is down, so an orchestrator
-# can distinguish "the process is wedged" from "a query is slow".
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||8080)+'/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+# Readiness, not liveness.
+#
+# This deliberately probes /api/ready and not /api/health. /api/health answers
+# 200 with `status: "degraded"` when the database is unreadable — that is
+# correct for a *liveness* probe, whose job is to say "the process is not
+# wedged". But Docker then reports the container healthy, `restart: unless-
+# stopped` never fires, and traffic keeps being routed to a server where every
+# query fails. A readiness probe is the one an orchestrator should gate on, and
+# it returns 503 until migrations have run and the database answers.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||8080)+'/api/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["node", "apps/api/src/server.ts"]

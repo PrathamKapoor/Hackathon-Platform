@@ -341,6 +341,7 @@ describe('api contract: organizer surfaces', () => {
      * which the client must parse rather than treat as an array.
      */
     const [firstJudge] = judges;
+    assert.ok(firstJudge !== undefined, 'the seeded panel has at least one judge to inspect');
     hasKeys(
       firstJudge,
       ['id', 'event_id', 'user_id', 'state', 'capacity', 'expertise', 'display_name', 'email', 'username', 'assigned', 'completed'],

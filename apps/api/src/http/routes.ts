@@ -17,7 +17,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { NORMALIZATION_METHODS, AGGREGATION_METHODS, EVENT_STATES } from '@verdict/core/types';
 import { ASSIGNMENT_STRATEGIES } from '@verdict/core/assignment';
-import { describeMatrix } from '../lib/rbac.ts';
+import { MACHINES, describeMachine } from '@verdict/core/state-machines';
 import { errors } from '../lib/errors.ts';
 import {
   MAX_PER_PAGE,
@@ -95,14 +95,27 @@ export function registerMetaRoutes(app: FastifyInstance, services: Services, reg
     summary: 'What this deployment supports — methods, limits, field types.',
   });
 
+  /*
+   * The lifecycle vocabulary, as data.
+   *
+   * This used to return `event: describeMatrix().length > 0 ? undefined :
+   * undefined` — a tautology that always produced `undefined`, and an import of
+   * the RBAC matrix into an event route, which had nothing to do with the answer.
+   * The useful thing to publish here is the transition table itself: an
+   * organizer or an integrating frontend can discover which moves are legal and,
+   * critically, *why* the illegal ones are refused, without reading the source.
+   */
   app.get('/api/lifecycle', async () => ({
-    event: describeMatrix().length > 0 ? undefined : undefined,
     states: EVENT_STATES,
-    note: 'See the StateMachines schema in /api/openapi.json for the full transition tables.',
+    machines: Object.fromEntries(
+      (Object.keys(MACHINES) as (keyof typeof MACHINES)[]).map((name) => [name, describeMachine(name)]),
+    ),
+    note: 'Guarded transitions are refused unless a fact holds or an authorised organizer supplies an explicit override. Each entry carries the reason so the refusal can be explained rather than merely reported.',
   }));
   registry.register({
     method: 'GET', path: '/api/lifecycle', tags: ['meta'], auth: 'none',
-    summary: 'Event lifecycle vocabulary.',
+    summary: 'Every lifecycle state machine and its legal transitions, with the reason for each.',
+    description: 'The same tables the server enforces. A client that renders a lifecycle control from this cannot offer a move the server will refuse.',
   });
 }
 
@@ -498,19 +511,31 @@ export function registerEventRoutes(app: FastifyInstance, services: Services, re
   app.get('/api/events/:eventId/transitions', async (request) => {
     const params = z.object({ eventId: Id }).parse(request.params);
     const event = services.events.require(params.eventId);
-    const { describeMachine } = await import('@verdict/core/state-machines');
+    const current = event.state;
+    // `describeMachine` lists every declared edge; the live facts (has the
+    // deadline passed? is there a submitted project?) are what the guards read,
+    // and those are already resolved into `event.dates` by the serializer. So
+    // this returns the declared vocabulary plus the concrete next moves the
+    // client can actually offer, rather than a table it must interpret itself.
     return {
-      current: event.state,
-      event: describeMachine('Event'),
-      registration: describeMachine('Registration'),
-      submission: describeMachine('Submission'),
-      judge: describeMachine('Judge'),
-      score: describeMachine('Score'),
+      current,
+      machines: Object.fromEntries(
+        (Object.keys(MACHINES) as (keyof typeof MACHINES)[]).map((name) => [name, describeMachine(name)]),
+      ),
+      available: MACHINES.Event.transitions
+        .filter((t) => t.from === current)
+        .map((t) => ({ to: t.to, reason: t.reason, guarded: Boolean(t.guard) })),
+      windows: {
+        registration: event.registration_closes_at,
+        submission: event.submission_closes_at,
+        judging: event.judging_closes_at,
+        voting: event.voting_closes_at,
+      },
     };
   });
   registry.register({
     method: 'GET', path: '/api/events/{eventId}/transitions', tags: ['events'], auth: 'none',
-    summary: 'Legal transitions from the current state, with the reason for each.',
+    summary: 'The current state, every lifecycle table, and the moves available from here.',
   });
 
   app.get('/api/events/:eventId/tracks', async (request) => {

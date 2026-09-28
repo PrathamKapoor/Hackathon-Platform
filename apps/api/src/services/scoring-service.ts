@@ -309,12 +309,34 @@ export class ScoringService {
     return this.requireScore(saved.id);
   }
 
-  /** The judge's own review, with criterion detail. Enforces invariant I2. */
+  /**
+   * The judge's own review, with criterion detail. Enforces invariant I2.
+   *
+   * This is a get-or-create. Reading your own review for an assignment that has
+   * no `scores` row yet *opens* it, exactly as `saveDraft` already does further
+   * down (`if (score === null) { this.startReview(...); }`).
+   *
+   * It is get-or-create rather than 404 because that 404 was a real, shipped
+   * dead end: the SPA's review page reads the review on mount, so any assignment
+   * without a score row rendered "Review unavailable — this review is not in
+   * your queue, or it belongs to another judge". The seeded demo hid it, because
+   * seeding writes a score row for all 36 assignments, but a judge assigned a
+   * project after that — which is every real event — hit it immediately, and so
+   * would any third-party API consumer.
+   *
+   * The write is idempotent and creates no scoring data: an empty DRAFT, plus
+   * the assignment-status and judge-activation bookkeeping `startReview` already
+   * does, all of it audited. Reading is therefore not side-effect-free on the
+   * first visit, which is stated here rather than hidden, and the state change
+   * it records ("a judge opened this project at this time") is worth having.
+   */
   ownReview(assignmentId: string, ctx: ActorContext): { score: ScoreRow; criteria: unknown[]; rubric: unknown } {
     const actor = requireActor(ctx);
     const assignment = this.requireOwnAssignment(assignmentId, actor, ctx);
-    const score = this.findScore(assignment.judge_id, assignment.submission_id);
-    if (score === null) throw errors.notFound('Review', assignmentId);
+    let score = this.findScore(assignment.judge_id, assignment.submission_id);
+    if (score === null) {
+      score = this.startReview(assignmentId, ctx).score;
+    }
     const rubricRow = this.rubrics.requireVersion(score.rubric_version_id);
     return {
       score,

@@ -387,7 +387,10 @@ export function registerSubmissionRoutes(app: FastifyInstance, services: Service
       team: submission.team_id ? services.teams.require(submission.team_id) : null,
       members: submission.team_id ? services.teams.members(submission.team_id) : [],
       screenshots: services.submissions.screenshots(submission.id).map((u) => ({ id: u.id, url: `/api/uploads/${u.id}`, width: u.width, height: u.height })),
-      editable: services.submissions['assertEditable' as never] === undefined ? true : true,
+      // The real answer, from the same ownership/state/deadline facts
+      // `assertEditable` enforces — so a form can disable itself and say why
+      // instead of the client re-deriving (and mis-deriving) a server rule.
+      ...services.submissions.canEdit(submission, request.ctx.actor, ctx(request)),
     };
   });
   registry.register({ method: 'GET', path: '/api/submissions/{submissionId}', tags: ['submissions'], auth: 'none', summary: 'One submission. Owners and organizers see draft fields; everyone else sees the public view.' });
