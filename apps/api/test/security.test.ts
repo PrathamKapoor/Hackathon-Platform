@@ -369,3 +369,220 @@ describe('security: storage-level immutability', () => {
     );
   });
 });
+
+/* ==================================================================== *
+ * Escalation and disclosure gaps found by a focused adversarial audit.
+ *
+ * Each test below is a regression on a defect that was confirmed by driving the
+ * real app, not by reading it. The suite's structural blind spot was that the
+ * seed creates exactly one event, so the two existing "cannot reach another
+ * event" tests were quietly vacuous - they looked for a second event, did not
+ * find one, and asserted something weaker. These create the second event.
+ * ==================================================================== */
+
+describe('security: cross-tenant boundaries', () => {
+  /**
+   * Two events, two organizers, and a person who is a JUDGE on one and the
+   * ORGANIZER of the other. That combination is not exotic: somebody running
+   * one hackathon while judging another is the ordinary case.
+   */
+  function twoEvents(t: { after: (fn: () => Promise<void> | void) => void }): Promise<{
+    harness: Harness;
+    eventA: string;
+    eventB: string;
+    organizerA: string;
+    organizerB: string;
+  }> {
+    return (async () => {
+      const harness = await createHarness();
+      t.after(() => harness.close());
+      const eventA = seededEventId(harness);
+      const { buildApp } = await import('../src/http/app.ts');
+      void buildApp;
+
+      // The second event is created over the API as an admin, so it is a real
+      // event with a real owner rather than a row poked in behind the services.
+      const admin = harness.client();
+      const adminLogin = await admin.post<{ csrfToken?: string }>('/api/auth/login', {
+        email: 'admin@hackathonraptors.dev',
+        password: DEMO_PASSWORD,
+      });
+      assert.equal(adminLogin.status, 200, `admin could not sign in: ${adminLogin.raw.slice(0, 160)}`);
+
+      const created = await admin.request('POST', '/api/events', {
+        csrf: true,
+        payload: { slug: 'second-event', name: 'Second Event', description: 'a second event, for the cross-tenant tests' },
+      });
+      assert.equal(created.status, 201, `could not create the second event: ${created.raw.slice(0, 240)}`);
+      const eventB = (JSON.parse(created.raw) as { id: string }).id;
+
+      return { harness, eventA, eventB, organizerA: 'organizer@dogfood.dev', organizerB: '' };
+    })();
+  }
+
+  test('organizing one event does not grant authority over another', async (t) => {
+    const { harness, eventA, eventB } = await twoEvents(t);
+    assert.notEqual(eventA, eventB, 'the fixture did not actually produce two events');
+
+    const organizerB = harness.client();
+    await organizerB.login('admin@hackathonraptors.dev', DEMO_PASSWORD);
+    // The admin who created event B is an admin, so drop to the real
+    // cross-tenant shape: a user who organizes B must not manage A.
+    const asB = harness.client();
+    await asB.login('organizer@dogfood.dev', DEMO_PASSWORD);
+
+    // organizer@dogfood.dev organizes event A only. Create a second organizer
+    // for event B, then assert each is refused the other's surfaces.
+    const admin = harness.client();
+    await admin.login('admin@hackathonraptors.dev', DEMO_PASSWORD);
+    void organizerB;
+
+    // organizer@dogfood.dev organizes event A only, and must be refused
+    // everything scoped to event B.
+    const foreign = await asB.get(`/api/events/${eventB}/registrations`);
+    assert.equal(foreign.status, 403, `organizing A let the caller read B's registrations: ${foreign.raw.slice(0, 200)}`);
+
+    const foreignAudit = await asB.get(`/api/events/${eventB}/audit`);
+    assert.equal(foreignAudit.status, 403, `organizing A let the caller read B's audit ledger: ${foreignAudit.raw.slice(0, 200)}`);
+
+    const foreignHooks = await asB.get(`/api/events/${eventB}/webhooks`);
+    assert.equal(foreignHooks.status, 403, `organizing A let the caller read B's webhooks: ${foreignHooks.raw.slice(0, 200)}`);
+
+    // And the event they *do* organize still works, so this is a scoping fix
+    // and not a blanket lockout.
+    const own = await asB.get(`/api/events/${eventA}/registrations`);
+    assert.equal(own.status, 200, `the organizer lost access to their own event: ${own.raw.slice(0, 200)}`);
+  });
+
+  test('judging one event does not grant organizer authority over it', async (t) => {
+    const { harness, eventA, eventB } = await twoEvents(t);
+
+    // Give the demo judge an ORGANIZER role on event A while they remain a
+    // JUDGE on event B. The old flat `eventIds` union put both ids in one
+    // list, so `canManageEvent` answered yes for event B on the strength of the
+    // role held on event A. `scope` is the NOT NULL companion of `event_id`
+    // (migration 13), and it must equal `COALESCE(event_id, '')`.
+    harness.db.exec(
+      `INSERT INTO user_roles (user_id, role, event_id, scope, granted_by, granted_at)
+       SELECT u.id, 'ORGANIZER', :a, :a, u.id, :at FROM users u WHERE u.email_normalized = 'amara@dogfood.dev'
+       ON CONFLICT DO NOTHING`,
+      { a: eventA, at: new Date().toISOString() },
+    );
+    void eventB;
+
+    const judge = harness.client();
+    await judge.login('amara@dogfood.dev', DEMO_PASSWORD);
+
+    // Amara is now an organizer of event A, so this is the *positive* case and
+    // it must work.
+    const own = await judge.get(`/api/events/${eventA}/registrations`);
+    assert.equal(own.status, 200, `the granted organizer role did not take effect: ${own.raw.slice(0, 200)}`);
+
+    // And the negative: as a judge on event B, Amara is not an organizer there.
+    // Create event B, then make Amara a JUDGE on it and nothing else.
+    const admin = harness.client();
+    await admin.login('admin@hackathonraptors.dev', DEMO_PASSWORD);
+    const created = await admin.request('POST', '/api/events', {
+      csrf: true,
+      payload: { slug: 'judged-event', name: 'Judged Event', description: 'Amara judges this one' },
+    });
+    assert.equal(created.status, 201, `could not create the judged event: ${created.raw.slice(0, 240)}`);
+    const judged = (JSON.parse(created.raw) as { id: string }).id;
+
+    harness.db.exec(
+      `INSERT INTO user_roles (user_id, role, event_id, scope, granted_by, granted_at)
+       SELECT u.id, 'JUDGE', :b, :b, u.id, :at FROM users u WHERE u.email_normalized = 'amara@dogfood.dev'
+       ON CONFLICT DO NOTHING`,
+      { b: judged, at: new Date().toISOString() },
+    );
+
+    // A new client so the actor is rebuilt from the new roles.
+    const rebuilt = harness.client();
+    await rebuilt.login('amara@dogfood.dev', DEMO_PASSWORD);
+    const refused = await rebuilt.get(`/api/events/${judged}/registrations`);
+    assert.equal(
+      refused.status,
+      403,
+      `an ORGANIZER role on one event granted organizer authority over another: ${refused.raw.slice(0, 200)}`,
+    );
+  });
+
+  test('a fresh account with no relationship to the event cannot read the submission list', async (t) => {
+    const { harness, eventA } = await twoEvents(t);
+
+    // The guard used to be `!isManager && user === null`, which only stopped the
+    // anonymous case. Any signed-in account got the whole organizer list,
+    // DRAFT rows included.
+    const fresh = await harness.client().post<{ user?: { email: string } }>('/api/auth/register', {
+      email: 'nosy@nowhere.test',
+      username: 'nosy',
+      password: DEMO_PASSWORD,
+      displayName: 'Nosy',
+    });
+    assert.equal(fresh.status, 201, `could not register the probe account: ${fresh.raw.slice(0, 200)}`);
+
+    const stranger = harness.client();
+    await stranger.login('nosy@nowhere.test', DEMO_PASSWORD);
+
+    const list = await stranger.get(`/api/events/${eventA}/submissions`);
+    assert.equal(list.status, 403, `an unrelated signed-in account read the submission list: ${list.raw.slice(0, 200)}`);
+
+    // A participant of the event is not an organizer either.
+    const participant = harness.client();
+    await participant.login('iris@dogfood.dev', DEMO_PASSWORD);
+    const asParticipant = await participant.get(`/api/events/${eventA}/submissions`);
+    assert.equal(
+      asParticipant.status,
+      403,
+      `a participant read the submission list: ${asParticipant.raw.slice(0, 200)}`,
+    );
+
+    // And the organizer still gets it, so this is a guard and not a lockout.
+    const organizer = harness.client();
+    await organizer.login('organizer@dogfood.dev', DEMO_PASSWORD);
+    const asOrganizer = await organizer.get(`/api/events/${eventA}/submissions`);
+    assert.equal(asOrganizer.status, 200, `the organizer lost the submission list: ${asOrganizer.raw.slice(0, 200)}`);
+  });
+});
+
+describe('security: password reset', () => {
+  test('a production build never returns the reset token to an anonymous caller', async (t) => {
+    /*
+     * Unauthenticated account takeover of anyone whose address is known. The
+     * token came back in the response body, and the 5/hour IP budget is no
+     * obstacle because one request per victim is all it takes.
+     */
+    const harness = await createHarness({ env: 'production' });
+    t.after(() => harness.close());
+
+    const response = await harness.client().post<{ sent?: boolean; resetToken?: string }>('/api/auth/password-reset', {
+      email: 'ben@dogfood.dev',
+    });
+    assert.equal(response.status, 200, `the request failed: ${response.raw.slice(0, 200)}`);
+    assert.equal(response.body.resetToken, undefined, 'a production build handed the reset token to an anonymous caller');
+    assert.doesNotMatch(response.raw, /resetToken/, 'the token appears somewhere in the production response');
+
+    // The flow still functions: an operator reads the token from the ledger.
+    const issued = harness.db.all<{ action: string; metadata: string }>(
+      `SELECT action, metadata FROM audit_events WHERE action LIKE 'auth.password_reset%' ORDER BY created_at DESC LIMIT 5`,
+    );
+    assert.ok(issued.length > 0, 'the reset was not recorded in the audit ledger, so an operator has no way to complete it');
+
+    // And the response is identical for a real and an invented address, so the
+    // endpoint still cannot be used to enumerate accounts.
+    const unknown = await harness.client().post('/api/auth/password-reset', { email: 'nobody@nowhere.test' });
+    assert.equal(unknown.status, response.status, 'the response status differs between a known and an unknown address');
+    assert.equal(unknown.raw, response.raw, 'the response body differs between a known and an unknown address');
+  });
+
+  test('outside production the token is returned, because there is no mail service', async (t) => {
+    const harness = await createHarness({ env: 'test' });
+    t.after(() => harness.close());
+    const response = await harness.client().post<{ resetToken?: string }>('/api/auth/password-reset', {
+      email: 'ben@dogfood.dev',
+    });
+    assert.equal(response.status, 200);
+    assert.ok(typeof response.body.resetToken === 'string', 'the demo flow no longer returns a token, so it cannot be completed');
+  });
+});
+

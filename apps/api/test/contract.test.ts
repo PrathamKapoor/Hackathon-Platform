@@ -444,8 +444,18 @@ describe('api contract: participant surfaces', () => {
   });
 
   test('the event submission list is paginated', async () => {
-    const response = await participant.get(`/api/events/${eventId}/submissions`);
+    // As the organizer. This used to run as `participant` and pass, because the
+    // route's guard was `!isManager && user === null` - which only stopped the
+    // *anonymous* case and quietly handed the organizer list, DRAFT rows
+    // included, to any signed-in account. The guard now refuses every
+    // non-organizer, so this test has to be the caller that is actually
+    // entitled to the list. `security.test.ts` covers the refusal.
+    const response = await organizer.get(`/api/events/${eventId}/submissions`);
     assert.equal(response.status, 200, response.raw);
     hasKeys(response.body, ['data', 'pagination'], 'submissions');
+
+    // And the participant is refused, which is the half that was wrong.
+    const refused = await participant.get(`/api/events/${eventId}/submissions`);
+    assert.equal(refused.status, 403, `a participant read the organizer submission list: ${refused.raw}`);
   });
 });

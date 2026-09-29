@@ -1058,6 +1058,7 @@ export async function seedDemoData(db: Database, config: AppConfig): Promise<See
     actor: {
       id: userIds.get('organizer') as string,
       roles: ['ORGANIZER', 'PARTICIPANT'],
+      roleEventIds: { ORGANIZER: [eventId], PARTICIPANT: [eventId], JUDGE: [], ADMIN: [] },
       eventIds: [eventId],
       state: 'ACTIVE',
     },

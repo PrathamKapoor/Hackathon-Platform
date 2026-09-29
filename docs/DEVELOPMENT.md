@@ -120,7 +120,7 @@ unrelated work - it is a separate decision with its own rollout.
 
 ### Unit and integration - `npm test`
 
-444 tests over 70 suites. Every API test boots the **real** Fastify instance
+460 tests over 70 suites. Every API test boots the **real** Fastify instance
 through `app.inject`, against a **real SQLite file on disk** - not a mock and not
 `:memory:`. Migrations, `STRICT` tables, foreign keys, `CHECK` constraints and
 triggers are therefore exercised for real, which is most of why the schema's

@@ -426,8 +426,19 @@ export function registerSubmissionRoutes(app: FastifyInstance, services: Service
     const eventId = eventIdOf(services, params.eventId);
     const paging = normalisePaging(query);
     const isManager = canManageEvent(request.ctx.actor, eventId);
-    if (!isManager && request.ctx.user === null) {
-      // Public callers see the gallery instead.
+    if (!isManager) {
+      /*
+       * This used to be `if (!isManager && request.ctx.user === null)`, which
+       * guarded only the *anonymous* case. Any signed-in account - including one
+       * registered a second earlier with no relationship to the event - got 200
+       * and the whole organizer list, `DRAFT` rows included, with
+       * fullDescription, repository URLs and the lot. The threat model claimed
+       * a signed-in participant gets 403; that claim was false and untested.
+       *
+       * The registry entry for this route already declares `auth: 'organizer'`
+       * and `submission:read`, so "not an organizer, go and look at the public
+       * gallery" is what the rest of the system already says everywhere else.
+       */
       throw errors.forbidden('Use the gallery endpoint to browse projects.');
     }
     const result = services.submissions.listForEvent(eventId, { ...(query.state ? { state: query.state } : {}), ...(query.trackId ? { trackId: query.trackId } : {}), ...(query.teamId ? { teamId: query.teamId } : {}), ...(query.search ? { search: query.search } : {}), limit: paging.limit, offset: paging.offset });

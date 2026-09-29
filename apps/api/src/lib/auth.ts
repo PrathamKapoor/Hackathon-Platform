@@ -623,10 +623,22 @@ export class AuthService {
     if (user === null) return null;
     const roles = this.rolesFor(user.id);
     const eventIds = new Set<string>();
+    /*
+     * Bound per role, not unioned. The union was the bug: it made
+     * `canManageEvent` answer yes to a person who organized one event and only
+     * judged another, because the flat list contained both. See the note on
+     * `Actor.roleEventIds`.
+     */
+    const roleEventIds = {} as Record<Role, string[]>;
     for (const role of roles) {
-      for (const id of this.eventIdsFor(user.id, role)) eventIds.add(id);
+      const ids = this.eventIdsFor(user.id, role);
+      roleEventIds[role] = ids;
+      for (const id of ids) eventIds.add(id);
     }
-    return { id: user.id, roles, eventIds: [...eventIds], state: user.state };
+    for (const role of ROLES) {
+      if (roleEventIds[role] === undefined) roleEventIds[role] = [];
+    }
+    return { id: user.id, roles, roleEventIds, eventIds: [...eventIds], state: user.state };
   }
 
   toPublicUser(user: UserRow): PublicUser {

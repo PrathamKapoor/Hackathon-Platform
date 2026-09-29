@@ -89,6 +89,22 @@ everyone out** - set it once and keep it.
 
 ### Residual
 
+- **Password reset depends on the operator having somewhere to read the token.**
+  There is no mail service, so outside production `POST /api/auth/password-reset`
+  returns the token in the response body — which, with the completion endpoint,
+  is unauthenticated account takeover of anyone whose address is known. In
+  production the token is **never** returned: the response is byte-identical
+  whether or not the address exists, and the token is recorded in the audit
+  ledger for the operator to read. The IP-keyed 5/hour budget bounds guessing but
+  is no obstacle to this, because one request per victim is all it takes. An
+  operator who wants real delivery needs SMTP in front, and until then the ledger
+  *is* the delivery mechanism — which is a genuine operational coupling, not just
+  a missing feature.
+- **Event roles are bound per event, but a judge's role is never automatically
+  revoked** when they are removed from, complete, or are deactivated on a panel.
+  So a departed judge keeps their `JUDGE` grant on that event indefinitely. The
+  fix is a revocation on the panel-lifecycle paths; until then, revoking a role
+  is an explicit administrative act and an operator should do it.
 - No MFA. A stolen password plus a working session is a compromised account.
   An operator who wants it needs a reverse proxy or a second factor in front.
 - No password complexity or breach-list check. Length is the only real defence,
@@ -140,10 +156,23 @@ rather than a bare 403.
 ### Residual
 
 - **`GET /api/events/{eventId}/submissions` has no `requirePermission` call.** It
-  is guarded by a bespoke `canManageEvent` check in the route. The behaviour is
-  correct; the enforcement is not in the matrix, so it is not covered by the
-  matrix-level tests. Nine other operations are similar, and the full list is in
-  `docs/API.md`.
+  is guarded by a `canManageEvent` check in the route. That check was *wrong*
+  until recently: it read `!isManager && user === null`, so it only ever stopped
+  anonymous callers and passed the organizer list to every signed-in account. It
+  is now `!isManager`, and all three caller classes are asserted. The remaining
+  weakness is that the enforcement still lives in the route rather than the
+  matrix, so it is not covered by the matrix-level tests. Nine other operations
+  are similar, and the full list is in `docs/API.md`.
+- **Event-scoped authority is bound per role, but the flat `eventIds` list is
+  still exposed on the actor and used for "involved with this event at all".**
+  The union across every role was the vulnerability: a person who *organized* one
+  event and merely *judged* another had both ids in one list, so
+  `canManageEvent` — `roles.includes('ORGANIZER') && eventIds.includes(id)` —
+  said yes for the event they only judged. That is cross-tenant privilege
+  escalation across most of the API surface, and the ordinary case is somebody
+  running one hackathon while judging another. `Actor.roleEventIds` now records
+  the binding and the two event-scope authorities consult it; the flat list
+  remains only for questions about involvement rather than authority.
 - **The `auth` field in the route registry is a documentation label, not a
   guard.** It installs no hook and no pre-handler. Only `x-verdict-permission`
   and the matrix reflect what is enforced, and the audit found 16 operations
@@ -183,8 +212,19 @@ all agree, so renaming `payload.html` to `payload.png` is refused. SVG is always
 rejected: it is a script container. Files are served with `nosniff` and an
 explicit `inline`/`attachment` disposition, and are checksummed on read.
 
-**CSV and JSON exports** are generated, not concatenated from user input into a
-spreadsheet formula position; exports are `no-store`.
+**CSV and JSON exports** are generated column by column, and every value that
+reaches one is escaped for a *spreadsheet*, not merely for a CSV parser;
+exports are `no-store`. Quoting alone is not a defence — a quoted `=1+1` is
+still a formula to Excel — so a leading `=`, `+`, `-`, `@`, tab or carriage
+return is prefixed with an apostrophe, which renders as text and is invisible in
+the cell.
+
+This matters more than the original phrasing suggested. Any participant can set
+their own display name, and an organizer is *told* to open the export, so a
+formula in a cell is a participant reaching the organizer's workstation. The DDE
+variant, `=cmd|'…'!A0`, is command execution there. The earlier claim that
+exports were "not concatenated from user input into a spreadsheet formula
+position" was about CSV quoting, and was true only in that narrow sense.
 
 ### Residual
 
@@ -360,8 +400,15 @@ ends - intelligence that is only supposed to be visible at a fixed time.
 organizer's submission list is enforced by permission, not by obscurity:
 `GET /api/events/{eventId}/submissions` requires `submission:read` in an
 organized event, while the gallery is public and shows only projects that are
-public. Drafts are never in either. An anonymous caller to the submission list
-gets 401, and a signed-in participant gets 403 rather than a partial list.
+public. Drafts are never in either. The organizer's submission list is refused to
+everyone else — anonymous callers and signed-in participants alike.
+
+That last claim was wrong until it was tested. The guard read
+`!isManager && user === null`, which stopped the *anonymous* case and handed the
+whole organizer list — `DRAFT` rows included, with full descriptions and
+repository URLs — to any account that had simply signed in. A freshly registered
+account with no relationship to the event was enough. It is now a plain
+`!isManager`, and `security.test.ts` asserts all three callers.
 
 **What does not.** The gallery is public *during* judging, by design, and it
 exposes project names, descriptions, technologies and repository links. There is
