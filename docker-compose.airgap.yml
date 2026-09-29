@@ -1,0 +1,35 @@
+# Compose override for the air-gapped verification.
+#
+# `internal: true` on the network is the isolation that matters here. A bridge
+# network with that flag has no gateway to the outside, so containers on it
+# cannot reach anything off-host - and, unlike `--network none`, it is still
+# reachable from the host, which is the only way to observe what the platform
+# actually does.
+#
+# The negative control that proves this network really blocks egress lives in
+# `apps/api/test/deployment.test.ts` and runs before the platform is started, so
+# a passing air-gap result can never be an artifact of a network that was not
+# actually isolated.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.airgap.yml up -d
+services:
+  verdict:
+    # The raised budgets are for the same reason as in `docker-compose.test.yml`:
+    # a suite that signs in about sixty times is not the threat model the
+    # 10-per-5-minutes auth budget exists for. Nothing about the isolation
+    # depends on them.
+    environment:
+      AUTH_RATE_LIMIT_MAX: "1000"
+      RATE_LIMIT_MAX: "100000"
+    volumes:
+      - type: volume
+        source: verdict-airgap-data
+        target: /data
+        volume: {}
+
+networks:
+  default:
+    internal: true
+
+volumes:
+  verdict-airgap-data:

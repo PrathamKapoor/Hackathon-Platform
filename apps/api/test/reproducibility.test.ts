@@ -16,7 +16,15 @@
 
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHarness, seededEventId, type Harness } from './harness.ts';
+import { createHarness, seededEventId, DEMO_PASSWORD, type Harness } from './harness.ts';
+
+async function openHarness(t: { after: (fn: () => Promise<void>) => void }): Promise<Harness> {
+  const harness = await createHarness();
+  t.after(async () => {
+    await harness.close();
+  });
+  return harness;
+}
 
 const RUNS = 5;
 
@@ -369,4 +377,74 @@ describe('tamper detection: verification reports a difference', () => {
       await h.close();
     }
   });
+});
+
+/**
+ * The public verification route, with a reference the platform actually emits.
+ *
+ * This is a regression on a defect that made the feature inoperative. The
+ * reference is `eventId::snapshotId`; both ids are a four-character prefix plus
+ * a 26-character ULID, so 30 characters each and 62 with the separator. The
+ * route's parameter schema capped the reference at 40, so every real published
+ * result came back 422 — on the one route whose whole purpose is letting a third
+ * party check a result without an account.
+ *
+ * It survived because nothing passed a real reference. The reproducibility tests
+ * used the organizer's own `POST .../reproduce`, which takes separate path
+ * segments; the acceptance suite checked that results are public and that the
+ * route exists. The composed public URL — the one that is printed on certificates
+ * and in the public results board — was never exercised.
+ */
+test('a real public verification reference is accepted, not truncated away', async (t) => {
+  const harness = await openHarness(t);
+  const eventId = seededEventId(harness);
+  const organizer = harness.client();
+  await organizer.login('organizer@dogfood.dev', DEMO_PASSWORD);
+
+  const run = await organizer.post<{ id: string; runId?: string }>(`/api/events/${eventId}/results/compute`, {});
+  assert.equal(run.status, 200, `compute failed: ${run.raw.slice(0, 200)}`);
+  const runId = run.body.id ?? run.body.runId;
+  assert.ok(runId !== undefined, `compute returned no run id: ${run.raw.slice(0, 200)}`);
+  const snapshot = await organizer.post<{ id: string }>(`/api/events/${eventId}/results/${runId}/snapshot`, {});
+  assert.ok(snapshot.status === 200 || snapshot.status === 201, `snapshot failed: ${snapshot.raw.slice(0, 200)}`);
+
+  // Verification is of a *published* snapshot, so publish first. A 404 before
+  // this point would be correct behaviour, and the distinction matters: it is
+  // what the test below asserts separately.
+  const published = await organizer.post(`/api/events/${eventId}/results/snapshots/${snapshot.body.id}/publish`, {});
+  assert.ok(published.status === 200 || published.status === 201, `publish failed: ${published.raw.slice(0, 200)}`);
+
+  // The composed reference, exactly as the public results board builds it.
+  const reference = `${eventId}::${snapshot.body.id}`;
+
+  // Assert the premise, so a future id-shortening change cannot make this test
+  // pass by accident.
+  assert.ok(
+    reference.length > 40,
+    `this test assumes a reference longer than 40 characters, but the ids are now ${String(reference.length)}; the premise needs revisiting`,
+  );
+
+  const anonymous = harness.client();
+  const verify = await anonymous.get<{ status: string; differences: unknown[] }>(
+    `/api/results/verify/${reference}`,
+  );
+  assert.equal(
+    verify.status,
+    200,
+    `a real ${String(reference.length)}-character reference returned ${String(verify.status)}: ${verify.raw.slice(0, 220)}`,
+  );
+  assert.equal(verify.body.status, 'MATCH', `the reference did not verify: ${verify.raw.slice(0, 220)}`);
+
+  // And a malformed one is still refused, so widening the bound did not turn the
+  // route into a catch-all.
+  const nonsense = await anonymous.get('/api/results/verify/not-a-reference');
+  assert.ok(
+    nonsense.status === 400 || nonsense.status === 404,
+    `a malformed reference returned ${String(nonsense.status)}: ${nonsense.raw.slice(0, 160)}`,
+  );
+
+  // A well-formed reference naming a snapshot that does not exist is a 404, not
+  // a 200 and not a 500.
+  const missing = await anonymous.get(`/api/results/verify/${eventId}::snp_does_not_exist_0000000000`);
+  assert.equal(missing.status, 404, `a nonexistent snapshot returned ${String(missing.status)}: ${missing.raw.slice(0, 160)}`);
 });

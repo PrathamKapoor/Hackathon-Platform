@@ -1292,7 +1292,22 @@ export function registerResultRoutes(app: FastifyInstance, services: Services, r
   });
 
   app.get('/api/results/verify/:reference', async (request) => {
-    const params = z.object({ reference: z.string().min(4).max(40) }).parse(request.params);
+    /*
+     * The bound has to fit a real reference, and it did not.
+     *
+     * A reference is `eventId::snapshotId`, and both ids are a four-character
+     * prefix plus a 26-character ULID: 30 characters each. With the separator
+     * that is 62. The schema capped the parameter at 40, so *every* real
+     * published result failed to verify with a 422 - on the one route whose
+     * entire purpose is letting a third party check a result without an
+     * account.
+     *
+     * It went unnoticed because the route had no test that passed a real
+     * reference; the acceptance suite checked the route exists and that results
+     * are public, not that this parameter accepts what the platform itself
+     * emits. 128 is comfortably above any real pair and still bounded.
+     */
+    const params = z.object({ reference: z.string().min(4).max(128) }).parse(request.params);
     const [eventId, snapshotId] = params.reference.split('::');
     if (eventId === undefined || snapshotId === undefined) throw errors.badRequest('Expected a reference of the form eventId::snapshotId.');
     return services.results.verifyPublic(eventIdOf(services, eventId), snapshotId, request.ctx.at);

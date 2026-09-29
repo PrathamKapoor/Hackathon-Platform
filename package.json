@@ -29,7 +29,8 @@
     "test:e2e": "npm run build && node --test --test-reporter=spec \"apps/api/test/e2e/*.test.ts\"",
     "test:browser": "npm run test:e2e",
     "acceptance": "node scripts/acceptance.ts",
-    "verify": "npm run typecheck && npm run test && npm run build && npm run test:e2e && npm run acceptance"
+    "verify": "npm run typecheck && npm run test && npm run build && npm run test:e2e && npm run acceptance",
+    "airgap": "node scripts/airgap-battery.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",

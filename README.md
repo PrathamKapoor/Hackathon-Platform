@@ -30,7 +30,7 @@ docker compose up
 ```
 
 That is the whole setup. No `.env` to copy, no secret to generate, no account to
-create, no external service, and no network needed once the image is built. Open
+create, no external service, and no network needed once the image is built. Verified, not assumed: the production image has been started with `--network none` and exercised over loopback — migrations, seed, both roles signing in, scoring, result computation, public verification. See `docs/ACCEPTANCE-REPORT.md`. Open
 <http://localhost:8080> — a demo event is seeded on first boot, so there is
 something to click immediately.
 
@@ -261,7 +261,7 @@ an operator with the file.
 
 ```bash
 npm run typecheck      # both the node and the browser project
-npm test               # 460 unit and integration tests
+npm test               # 461 unit and integration tests
 npm run test:core      # the judging engine alone
 npm run test:api       # API, security, migrations, static serving
 npm run test:e2e       # builds, then 50 browser tests

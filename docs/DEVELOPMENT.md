@@ -107,6 +107,38 @@ cannot do — a compose file that mounts its volume to the wrong path passes eve
 other check and loses the data. Where Docker is absent the test is **skipped
 with a reason**, never silently passed.
 
+### The air-gapped battery
+
+`npm run airgap` is a separate script because it has to run *inside* the
+container, not against it:
+
+```bash
+docker build -t verdict:local .
+docker run -d --name verdict-airgap --network none \
+  -e DATABASE_FILE=/data/verdict.db -e STORAGE_DIR=/data/uploads \
+  -e WEB_DIST_DIR=/app/apps/web/dist -e AUTO_MIGRATE=true -e AUTO_SEED=true \
+  -e SESSION_SECRET=<32+ characters> -v verdict-airgap-data:/data verdict:local
+docker cp scripts/airgap-battery.mjs verdict-airgap:/data/battery.mjs
+docker exec verdict-airgap node /data/battery.mjs
+```
+
+`--network none` rather than a compose `internal: true` network, and that is not a
+preference. An internal bridge network still refuses to publish ports to the
+host, so the container becomes unobservable and the only thing you can honestly
+assert is that it booted. With no network namespace at all, the battery drives
+the real API over loopback, which is the stronger claim.
+
+The battery's **first three checks are the negative control**: resolve a public
+name, open a TCP connection to a public address, `fetch` an https URL — and
+require a loopback connection to succeed. If any of the three reached the
+outside, the isolation was not real and no later result would mean anything. That
+ordering is deliberate; do not reorder the script.
+
+It cannot cover the browser suite, because no network namespace means no TCP
+route from the host. That gap is recorded in the acceptance report rather than
+worked around: the browser tests run against the normally-networked container,
+and this battery covers everything reachable over loopback.
+
 Run `npm run verify` before pushing anything that changes behaviour. It is the
 same command CI should run.
 
@@ -120,7 +152,7 @@ unrelated work - it is a separate decision with its own rollout.
 
 ### Unit and integration - `npm test`
 
-460 tests over 70 suites. Every API test boots the **real** Fastify instance
+461 tests over 70 suites. Every API test boots the **real** Fastify instance
 through `app.inject`, against a **real SQLite file on disk** - not a mock and not
 `:memory:`. Migrations, `STRICT` tables, foreign keys, `CHECK` constraints and
 triggers are therefore exercised for real, which is most of why the schema's

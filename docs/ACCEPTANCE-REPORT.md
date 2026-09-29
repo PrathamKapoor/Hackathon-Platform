@@ -29,7 +29,7 @@ Everything here was run, and the counts are what the commands actually printed.
 | Command | Result |
 | --- | --- |
 | `npm run typecheck` | Pass. Both projects: core/api/tests/scripts, then the web app. |
-| `npm test` | **460 passed**, 0 failed, 70 suites. Includes the deployment test that builds the image and starts the stack when Docker is present. |
+| `npm test` | **461 passed**, 0 failed, 70 suites. Includes the deployment test that builds the image and starts the stack when Docker is present. |
 | `npm run build` | Pass. 505.46 kB JS, 146.44 kB gzipped, 16.66 kB CSS. |
 | `npm run test:e2e` | **50 passed**, 0 failed, 8 suites, real Chrome against the built bundle. |
 | `npm run acceptance` | **35 of 35 checks passed.** |
@@ -39,6 +39,8 @@ Everything here was run, and the counts are what the commands actually printed.
 | `docker compose up -d` | Started, healthy in ~1 s, migrations applied on first boot, demo seeded, ready in 779 ms. |
 | `E2E_BASE_URL=… node --test apps/api/test/e2e/*` | **50 passed**, 0 failed, 8 suites, real Chrome against the **container**. |
 | Container organizer-path probe | 43 checks, all passed. |
+| `npm run airgap` | **20 of 20** checks passed inside a `--network none` container. |
+| Isolation negative control | 3 external probes blocked, 1 loopback probe allowed, run *before* the platform started. |
 | `docker compose down -v && up -d` | Volume removed, database rebuilt from migrations, re-seeded. |
 | Multi-viewport browser check | 4 viewports × 10 surfaces, in both browser runs. |
 | Clean-database migration + seed | Every test harness, plus a fresh volume in the container. |
@@ -66,7 +68,90 @@ In the container, migrations on first boot plus the full demo seed completed in
 
 ---
 
-## The container, specifically
+## Air-gapped execution
+
+The claim used to be "offline-capable by design", which is inference from reading
+the code. It is now executed.
+
+**Method.** The production image was started with `docker run --network none` —
+not a blocked route, not a filtered hostname, no network namespace at all. The
+container was confirmed to have an empty gateway, no IP address, and zero
+non-loopback interfaces. The whole battery then ran *inside* that container over
+loopback, via `docker exec`.
+
+**The negative control comes first.** A "we ran it offline" result is worthless
+unless the isolation is first shown to actually block traffic, so before the
+platform is trusted, the same node image on the same network is asked to resolve
+`registry.npmjs.org`, to open a TCP connection to `1.1.1.1:443`, and to `fetch`
+`https://example.com` — while a loopback connection is required to succeed. Only
+when all three external attempts fail and loopback still works does the platform
+result mean anything. That control is part of the battery, not a separate claim.
+
+**20 of 20 passed, with no network interface present:**
+
+| Check | Result |
+| --- | --- |
+| Zero non-loopback interfaces | confirmed |
+| DNS resolution of a public name | blocked, `EAI_AGAIN` |
+| Outbound HTTPS | blocked, `EAI_AGAIN` |
+| Container starts | healthy, `tini` as PID 1 |
+| Migrations execute | `schema version 15 (applied 15)` |
+| Seed executes | 24 users, 12 teams, 12 projects, 5 judges, 34 reviews |
+| Health endpoint | 200 |
+| Readiness endpoint | 200, `schema=15` |
+| Frontend shell | 200, 1416 bytes, React root present |
+| Built assets served | 2 assets, both 200 |
+| Deep link | 200, SPA shell |
+| Public gallery, anonymously | 200, 12 projects |
+| Organizer sign-in | 200 |
+| Organizer dashboard | 200, 18 registrations |
+| Judge sign-in and queue | 200, queue total 2 |
+| **Judge saves a score** | 4 criteria scored and submitted |
+| Normalization comparison | 200 |
+| **Result computation** | run with 12 entries |
+| **Determinism** | two computations, identical integrity hash |
+| Snapshot publish + public verification | 200, reproduced as `MATCH` |
+| Audit ledger | 71 entries, 63 with a request id |
+| OpenAPI served | 200, 123 paths |
+| Public gallery after organizer activity | 200, unaffected |
+
+**What this does and does not prove.** It proves the running platform needs
+nothing but itself: no DNS, no CDN, no external API, no auth provider, no
+telemetry. It does not cover the browser suite, because with no network
+namespace there is no way for a browser on the host to reach the container over
+TCP — so the 50 browser tests are verified against the normally-networked
+container, and this battery verifies everything reachable over loopback. That
+split is stated rather than papered over.
+
+**The offline dependency audit found no runtime network dependency.** The only
+`fetch` in the server is outbound webhook delivery, which is opt-in and
+organizer-configured. The web client makes same-origin relative requests only.
+There is no CDN script, no web font, no analytics, no telemetry, and no external
+authentication in the built bundle — the two assets the HTML references are both
+served from `/assets/`.
+
+**And it found a real defect.** See defect 31 below: the public result
+verification route could not verify any real result.
+
+### A defect the air-gapped run found
+
+31. **`GET /api/results/verify/{reference}` returned 422 for every real
+    published result.** The reference is `eventId::snapshotId`; both ids are a
+    four-character prefix plus a 26-character ULID, so 30 characters each and 62
+    with the separator. The parameter schema capped it at 40. The one route whose
+    entire purpose is letting a third party check a result without an account
+    therefore failed on every result the platform produced.
+
+    It survived because nothing passed a real reference: the reproducibility
+    tests used the organizer's own `POST .../reproduce`, which takes separate path
+    segments, and the acceptance suite checked that results are *public* and that
+    the route *exists*. The composed public URL — the one printed on certificates
+    and on the public results board — had never been exercised. Fixed to 128, with
+    a regression test that asserts a real 62-character reference verifies as
+    `MATCH`, that a malformed one is still refused, and that a nonexistent
+    snapshot is a 404 rather than a 200 or a 500.
+
+---
 
 Everything in this section was observed on the running container, not reasoned
 about from the Dockerfile.
@@ -244,7 +329,7 @@ This is a property of the harness, not a product defect, and it is why
 | Threat model | Met | `THREAT-MODEL.md`: the general web surface, plus a section each on Sybil voting, ballot stuffing, submission scraping, judge collusion and deadline gaming. |
 | API reference | Met | `API.md`. The six documented defects in the published document are **fixed**, and the document is now checked against a live server by `openapi-truth.test.ts` on every `npm test`. |
 | Development guide | Met | `DEVELOPMENT.md`. |
-| Test suite | Met | 460 unit/integration, 50 browser, 35 acceptance. |
+| Test suite | Met | 461 unit/integration, 50 browser, 35 acceptance. |
 
 ---
 
@@ -361,11 +446,7 @@ Stated rather than hidden. None is a surprise; all are recorded in the docs.
   plus the pruned workspace in the runtime layer, not the application.
 - The container runs a single instance by design. Two against one volume would
   not corrupt SQLite, but each would keep its own rate-limit counters.
-- **Offline runtime was not re-verified in the image.** The application makes no
-  outbound calls except webhook deliveries, which are opt-in, and the browser
-  suite passing against the container shows no network dependency at runtime.
-  A true air-gapped run — `docker run` with no network at all — was not
-  performed.
+- **The browser suite could not run inside the air-gapped container.** With no network namespace there is no TCP route from the host, so the 50 browser tests are verified against the normally-networked container and the air-gapped battery covers everything reachable over loopback. This is a real gap in the air-gap evidence and is stated rather than worked around.
 
 **Scale**
 - **One instance, by design.** A single SQLite writer. Two instances against one
@@ -417,7 +498,7 @@ Stated rather than hidden. None is a surprise; all are recorded in the docs.
 
 ## Release checklist
 
-- [x] `npm run verify` green: typecheck, 460 unit/integration, build, 50 browser, 35 acceptance
+- [x] `npm run verify` green: typecheck, 461 unit/integration, build, 50 browser, 35 acceptance
 - [x] OpenAPI document current, and checked against a live server on every test run
 - [x] Result pipeline deterministic and reproducible, verified from stored reviews
 - [x] Published results immutable, corrections supersede rather than rewrite
@@ -434,6 +515,7 @@ Stated rather than hidden. None is a surprise; all are recorded in the docs.
 - [x] **Docker image built, container run, and the deployed artefact driven** — image builds clean, starts with no `.env`, applies migrations, seeds, survives restart and `down`/`up`, wipes on `down -v`, drains gracefully as non-root; 50 browser tests and a 40-check organizer probe pass against it
 - [x] Every create route returns its documented status; a duplicate track name is no longer a 500
 - [ ] **Restore from a production backup** — tested procedurally, not against production data
-- [ ] **Air-gapped container run** — runtime is offline-capable by design and the browser suite passes against the container, but no `docker run --network none` was performed
+- [x] **Air-gapped container run** — the production image started with `--network none`, and 20 of 20 checks passed over loopback: migrations, seed, health, frontend and assets, sign-in for both roles, scoring and submission, normalization, result computation, determinism, public verification, audit, OpenAPI. Isolation proven by a negative control first. **Verified in an air-gapped container execution**, not inferred.
+- [ ] **Browser suite inside the air-gapped container** — impossible by construction: no network namespace means no TCP route from the host. Covered against the normally-networked container instead, and the split is recorded.
 - [x] No secrets, credentials or `.env` committed
 - [x] All commits authored and committed by the repository owner alone
