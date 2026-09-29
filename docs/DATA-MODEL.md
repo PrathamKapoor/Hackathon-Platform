@@ -14,10 +14,10 @@ stores, and the places where the two have come apart.
 
 | | |
 | --- | --- |
-| Migrations | 14 (schema version 14) |
+| Migrations | 15 (schema version 15) |
 | Tables | 45, **all `STRICT`** |
 | Explicit indexes | 69 (2 of them `UNIQUE`) |
-| Inline `UNIQUE` constraints | 32 |
+| Inline `UNIQUE` constraints | 30, giving 76 `sqlite_autoindex` entries in total |
 | Triggers | 12 |
 | Inline `CHECK` constraints | 52 |
 | `WITHOUT ROWID` tables | 0 |
@@ -48,6 +48,7 @@ cover.
 | 12 | `result-run-entries` | `result_run_entries`, and the run-entry immutability trigger |
 | 13 | `user-roles-global-scope` | rebuilds `user_roles` to support global roles properly |
 | 14 | `participation-record-uniqueness` | dedupes participation records, adds the unique index behind them |
+| 15 | `export-job-kind-csv-imports` | rebuilds `export_jobs` so the `kind` check constraint admits every CSV export and the three import kinds |
 
 ---
 

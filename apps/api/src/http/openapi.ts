@@ -128,6 +128,15 @@ export function buildOpenApiDocument(options: OpenApiOptions): Record<string, un
    */
   for (const route of options.registry.published()) {
     const entry = paths[route.path] ?? {};
+    const successStatus = route.success ?? 200;
+    const successDescription =
+      successStatus === 201
+        ? 'Created'
+        : successStatus === 202
+          ? 'Accepted'
+          : successStatus === 204
+            ? 'No content'
+            : 'Success';
     const operation: Record<string, unknown> = {
       operationId: operationIdFor(route),
       tags: route.tags,
@@ -172,23 +181,69 @@ export function buildOpenApiDocument(options: OpenApiOptions): Record<string, un
     }
 
     if (route.querystring) {
+      /*
+       * Expanded into one parameter per property.
+       *
+       * It used to be emitted as a single parameter literally named `query`,
+       * carrying an object schema. No OpenAPI tooling reads that as individual
+       * query parameters, so the effect was that the filters, sorts, status
+       * values and date ranges on roughly fifteen endpoints were documented
+       * nowhere - and `GET /api/events` was the only operation in the whole
+       * document with any query parameters at all, despite being the only route
+       * that happened to declare its schema inline.
+       */
       const schema = toJsonSchema(route.querystring, 'input');
-      if (schema) {
-        operation.parameters = [
-          ...(operation.parameters as unknown[]),
-          { name: 'query', in: 'query', required: false, schema, description: 'Query parameters.' },
-        ];
+      if (schema !== null && typeof schema === 'object' && schema !== null && 'properties' in schema) {
+        const properties = (schema as { properties?: Record<string, unknown>; required?: string[] }).properties ?? {};
+        const required = new Set((schema as { required?: string[] }).required ?? []);
+        for (const [name, propertySchema] of Object.entries(properties)) {
+          operation.parameters = [
+            ...(operation.parameters as unknown[]),
+            {
+              name,
+              in: 'query',
+              required: required.has(name),
+              schema: propertySchema as Record<string, unknown>,
+              ...(typeof propertySchema === 'object' && propertySchema !== null && 'description' in propertySchema
+                ? { description: (propertySchema as { description: string }).description }
+                : {}),
+            },
+          ];
+        }
       }
     }
 
-    if (route.body) {
+    if (route.multipart === true) {
+      /*
+       * A file upload has no useful JSON Schema - it is a binary part - so the
+       * route declares `multipart: true` and the shape is written out here.
+       * Without this the upload endpoint had no documented request body at all,
+       * despite requiring a `file` part.
+       */
+      operation.requestBody = {
+        required: true,
+        content: {
+          'multipart/form-data': {
+            schema: {
+              type: 'object',
+              required: ['file'],
+              properties: {
+                file: {
+                  type: 'string',
+                  format: 'binary',
+                  description: 'PNG, JPEG, WEBP or GIF. SVG is refused. The declared type, the extension and the file\'s magic bytes must all agree.',
+                },
+              },
+            },
+          },
+        },
+      };
+    } else if (route.body) {
       const schema = toJsonSchema(route.body, 'input');
-      const contentType = route.path.includes('/uploads') || route.path.includes('import') ? 'multipart/form-data' : 'application/json';
       if (schema) {
-        (operation.requestBody as Record<string, unknown> | undefined) ??= {};
         operation.requestBody = {
           required: true,
-          content: { [contentType]: { schema } },
+          content: { 'application/json': { schema } },
         };
       }
     }
@@ -197,12 +252,19 @@ export function buildOpenApiDocument(options: OpenApiOptions): Record<string, un
       const schema = toJsonSchema(route.response, 'output');
       const responses = operation.responses as Record<string, unknown>;
       if (schema) {
-        responses['200'] = { description: 'Success', content: { 'application/json': { schema } } };
+        responses[String(successStatus)] = {
+          description: successDescription,
+          content: { 'application/json': { schema } },
+        };
       } else {
-        responses['200'] = { description: 'Success' };
+        responses[String(successStatus)] = { description: successDescription };
       }
     } else {
-      (operation.responses as Record<string, unknown>)['204'] = { description: 'Success, no content' };
+      /*
+       * The status comes from the route, not from whether it happened to declare
+       * a response schema. See `RouteDoc.success`.
+       */
+      (operation.responses as Record<string, unknown>)[String(successStatus)] = { description: successDescription };
     }
 
     const responses = operation.responses as Record<string, unknown>;
@@ -216,7 +278,7 @@ export function buildOpenApiDocument(options: OpenApiOptions): Record<string, un
     if (!route.errors?.includes('FORBIDDEN') && route.auth !== 'none') {
       responses['403'] = { description: 'Authenticated but not permitted', ...errorContent };
     }
-    if (!route.errors?.includes('RATE_LIMITED')) {
+    if (!route.errors?.includes('RATE_LIMITED') && route.rateLimited !== false) {
       responses['429'] = { description: 'Rate limit exceeded', ...errorContent };
     }
 

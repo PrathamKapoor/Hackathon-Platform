@@ -40,6 +40,23 @@ const Paging = z.object({
   perPage: z.coerce.number().int().min(1).max(MAX_PER_PAGE).default(25),
 });
 
+/*
+ * Query schemas, named and shared.
+ *
+ * These used to be built inline inside each handler, which meant the published
+ * document had nothing to describe: a route's query was validated correctly and
+ * documented nowhere, and `GET /api/events` was the only operation in the whole
+ * spec with query parameters because it was the only one that happened to repeat
+ * its schema in the registry. Each is now a constant the handler parses and the
+ * registry hands to the generator, so the document cannot describe a different
+ * query than the one that is enforced.
+ */
+const UserSearchQuery = z.object({ search: z.string().min(2).max(100) }).merge(Paging);
+const EventListQuery = Paging.extend({
+  state: z.enum(EVENT_STATES).optional(),
+  search: z.string().max(100).optional(),
+});
+
 type Services = AppServices['services'];
 
 /* ==================================================================== meta */
@@ -57,7 +74,7 @@ export function registerMetaRoutes(app: FastifyInstance, services: Services, reg
 
   app.get('/api/health', { config: { rateLimit: false } as never }, health);
   registry.register({
-    method: 'GET', path: '/api/health', tags: ['meta'], auth: 'none', hidden: true,
+    method: 'GET', path: '/api/health', tags: ['meta'], auth: 'none', hidden: true, rateLimited: false,
     summary: 'Liveness probe — answers even when the database is down.',
   });
 
@@ -187,13 +204,13 @@ export function registerAuthRoutes(app: FastifyInstance, services: Services, reg
     return reply.status(201).send({ user: result.user, csrfToken: result.session.csrfToken });
   });
   registry.register({
-    method: 'POST', path: '/api/auth/register', tags: ['auth'], auth: 'none', body: RegisterBody,
+    method: 'POST', path: '/api/auth/register', success: 201,
+    tags: ['auth'], auth: 'none', body: RegisterBody,
     summary: 'Create an account and sign in.',
     description: 'The new account receives the PARTICIPANT role. Organizer and admin accounts are created by an existing admin.',
     response: z.object({ user: z.unknown(), csrfToken: z.string() }),
     errors: ['VALIDATION_FAILED', 'CONFLICT', 'RATE_LIMITED', 'CSRF_FAILED'],
   });
-
   app.post('/api/auth/login', { config: { rateLimit: { max: config.security.authRateLimitMax, timeWindow: config.security.authRateLimitWindowMs } } as never }, async (request, reply) => {
     const body = LoginBody.parse(request.body) as z.infer<typeof LoginBody>;
     const result = auth.login(body, {
@@ -225,10 +242,10 @@ export function registerAuthRoutes(app: FastifyInstance, services: Services, reg
     return reply.status(204).send();
   });
   registry.register({
-    method: 'POST', path: '/api/auth/logout', tags: ['auth'], auth: 'session',
+    method: 'POST', path: '/api/auth/logout', success: 204,
+    tags: ['auth'], auth: 'session',
     summary: 'Sign out and revoke the session server-side.',
   });
-
   app.get('/api/auth/session', async (request) => {
     if (request.ctx.user === null) return { authenticated: false, user: null };
     return { authenticated: true, user: serializePublicUser(auth.toPublicUser(request.ctx.user), request.ctx.actor?.eventIds ?? []) };
@@ -376,7 +393,7 @@ export function registerProfileRoutes(app: FastifyInstance, services: Services, 
   });
 
   app.get('/api/users/search', async (request) => {
-    const query = z.object({ search: z.string().min(2).max(100) }).merge(Paging).parse(request.query);
+    const query = UserSearchQuery.parse(request.query);
     requirePermission(services, request.ctx, 'user', 'read');
     const paging = normalisePaging(query);
     const result = services.auth.search(query.search, paging.limit, paging.offset);
@@ -433,10 +450,7 @@ const EventBody = z.object({
 
 export function registerEventRoutes(app: FastifyInstance, services: Services, registry: RouteRegistry): void {
   app.get('/api/events', async (request, reply) => {
-    const query = z
-      .object({ state: z.enum(EVENT_STATES).optional(), search: z.string().max(100).optional() })
-      .merge(Paging)
-      .parse(request.query);
+    const query = EventListQuery.parse(request.query);
     const paging = normalisePaging(query);
     const ctx = actorContext({ actor: request.ctx.actor, requestId: request.ctx.requestId, ipAddress: request.ctx.ipAddress, userAgent: request.ctx.userAgent, at: request.ctx.at });
 
@@ -454,7 +468,7 @@ export function registerEventRoutes(app: FastifyInstance, services: Services, re
     });
   });
   registry.register({
-    method: 'GET', path: '/api/events', tags: ['events'], auth: 'none', querystring: Paging.extend({ state: z.enum(EVENT_STATES).optional(), search: z.string().optional() }),
+    method: 'GET', path: '/api/events', tags: ['events'], auth: 'none', querystring: EventListQuery,
     summary: 'List events you can see.',
     description: 'Anonymous callers see published and in-flight events. Signed-in organizers additionally see the events they organize.',
   });
@@ -466,12 +480,12 @@ export function registerEventRoutes(app: FastifyInstance, services: Services, re
     return reply.status(201).send(serializeEvent(event, actorContext(request.ctx)));
   });
   registry.register({
-    method: 'POST', path: '/api/events', tags: ['events'], auth: 'session', body: EventBody,
+    method: 'POST', path: '/api/events', success: 201,
+    tags: ['events'], auth: 'session', body: EventBody,
     summary: 'Create an event.', permission: { resource: 'event', action: 'create' },
     description: 'The creator becomes an organizer of the new event. A default application form is created so the event is immediately usable.',
     errors: ['VALIDATION_FAILED', 'CONFLICT', 'FORBIDDEN'],
   });
-
   app.get('/api/events/:eventId', async (request) => {
     const params = z.object({ eventId: Id }).parse(request.params);
     const event = services.events.require(params.eventId);
@@ -554,8 +568,8 @@ export function registerEventRoutes(app: FastifyInstance, services: Services, re
     requirePermission(services, request.ctx, 'track', 'create', { inOrganizedEvent: canOrganize(request, services, eventId) }, { eventId, resourceType: 'track' });
     return reply.status(201).send(services.events.addTrack(eventId, body, actorContext(request.ctx)));
   });
-  registry.register({ method: 'POST', path: '/api/events/{eventId}/tracks', tags: ['events'], auth: 'organizer', summary: 'Add a track.', permission: { resource: 'track', action: 'create' } });
-
+  registry.register({ method: 'POST', path: '/api/events/{eventId}/tracks', success: 201,
+    tags: ['events'], auth: 'organizer', summary: 'Add a track.', permission: { resource: 'track', action: 'create' } });
   app.get('/api/events/:eventId/prizes', async (request) => {
     const params = z.object({ eventId: Id }).parse(request.params);
     return { data: services.events.listPrizes(services.events.require(params.eventId).id) };
@@ -569,7 +583,8 @@ export function registerEventRoutes(app: FastifyInstance, services: Services, re
     requirePermission(services, request.ctx, 'prize', 'create', { inOrganizedEvent: canOrganize(request, services, eventId) }, { eventId, resourceType: 'prize' });
     return reply.status(201).send(services.events.addPrize(eventId, body, actorContext(request.ctx)));
   });
-  registry.register({ method: 'POST', path: '/api/events/{eventId}/prizes', tags: ['events'], auth: 'organizer', summary: 'Add a prize.', permission: { resource: 'prize', action: 'create' } });
+  registry.register({ method: 'POST', path: '/api/events/{eventId}/prizes', success: 201,
+    tags: ['events'], auth: 'organizer', summary: 'Add a prize.', permission: { resource: 'prize', action: 'create' } });
 }
 
 export function canOrganize(request: FastifyRequest, services: Services, eventIdOrSlug: string): boolean {

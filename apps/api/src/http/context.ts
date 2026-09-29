@@ -56,6 +56,33 @@ export function newRequestId(): string {
   return `req_${randomUUID()}`;
 }
 
+/**
+ * The request id, honouring a caller-supplied one.
+ *
+ * Every operation in the published document advertised an optional `requestId`
+ * header "echoed in the response and in the audit ledger", and the server
+ * ignored the header completely - it generated its own id and never wrote one
+ * back. A client relying on that could correlate nothing at all, which is the
+ * opposite of the point.
+ *
+ * So the documented behaviour is now implemented rather than deleted: a caller
+ * may supply `x-request-id`, it is accepted when it looks like an identifier and
+ * bounded in length, and Fastify echoes it on the response. Anything that does
+ * not look like an id is ignored rather than rejected, because refusing a
+ * request over a malformed correlation id would be a denial of service for a
+ * debugging aid. An unparseable value simply gets a generated id, so the
+ * invariant is that a response always carries a request id the ledger shares.
+ */
+const REQUEST_ID_HEADER = 'x-request-id';
+const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{8,128}$/;
+
+export function requestIdFrom(req: { headers: Record<string, unknown> }): string {
+  const raw = req.headers[REQUEST_ID_HEADER];
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  if (typeof value === 'string' && REQUEST_ID_PATTERN.test(value)) return value;
+  return newRequestId();
+}
+
 /* ------------------------------------------------------ context builder */
 
 /**
@@ -502,6 +529,13 @@ export type RouteDoc = {
   description?: string;
   /** Zod schemas; converted to JSON Schema when the document is generated. */
   body?: ZodType;
+  /**
+   * The body is `multipart/form-data` rather than JSON. A binary part has no
+   * meaningful Zod schema, so this says what the parts are and the generator
+   * writes the shape out. It used to be inferred from the path containing
+   * "uploads", which meant the upload endpoint got no documented body at all.
+   */
+  multipart?: boolean;
   querystring?: ZodType;
   params?: ZodType;
   response?: ZodType;
@@ -512,6 +546,32 @@ export type RouteDoc = {
   permission?: { resource: Resource; action: Action };
   /** Hide from the published document (health, internal). */
   hidden?: boolean;
+  /**
+   * The status the route returns on success. Defaults to 200.
+   *
+   * The generator used to infer this from whether a response schema was
+   * declared, and emit `204 No Content` for every route that had none. Since
+   * only two routes declared one, 140 of 142 operations were documented as 204
+   * when the real distribution is 200, 201 and 204 - a client generated from
+   * that document would not know a creation had happened. Declared per route
+   * instead, so the document states what the handler does.
+   */
+  success?: 200 | 201 | 202 | 204;
+  /**
+   * Whether this route consumes rate-limit budget. Defaults to true.
+   *
+   * `/api/health` is exempt, so a liveness probe cannot exhaust anyone's budget
+   * and a probe that is itself rate limited cannot fail for the wrong reason. The
+   * document used to advertise `429` on every operation including that one, which
+   * is a response it can never return.
+   */
+  rateLimited?: boolean;
+  /**
+   * Whether a successful request changes persisted state. Used to warn in the
+   * document, because a `GET` that writes is a trap for crawlers and link
+   * previews.
+   */
+  mutates?: boolean;
 };
 
 /**

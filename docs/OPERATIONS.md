@@ -11,20 +11,45 @@ respect: one container, one volume, one database file, one writer.
 
 ## Deploying
 
+### For a look at it
+
 ```bash
-cp .env.example .env
-node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
-# paste into SESSION_SECRET in .env, then:
 docker compose up --build
 ```
 
-Serves `http://localhost:8080` with a seeded demo event.
+That is the whole command. **No `.env` file is required**, and that used to be a
+lie: the instructions said "copy `.env.example` to `.env` first" but the
+repository shipped neither a working default nor an enforced step, so a fresh
+clone failed to start. The compose file now supplies every value itself, so the
+single-command claim is true.
 
-**`SESSION_SECRET` is the only value with no default**, and a missing or
-too-short one is a fatal boot error in production rather than a warning. The
-alternative is a per-boot random secret that signs every user out on every
-deploy - and an organizer mid-event will not forgive it. Set it once, keep it.
+**The `SESSION_SECRET` in `docker-compose.yml` is a published constant, in
+capitals, in the file.** It is there so a first `docker compose up` works and a
+demo can be handed to somebody. It is not a secret, because it is in a public
+repository. It is fine for evaluating the system on a laptop and **must be
+overridden for anything else**.
+
+### For a real event
+
+```bash
+node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
+# put it in .env as SESSION_SECRET, then:
+docker compose up --build
+```
+
+Set `AUTO_SEED=false` as well, or the stack comes up with the demo dataset
+loaded. It serves `http://localhost:8080`.
+
+Outside the compose file, `SESSION_SECRET` has **no default** and a missing or
+too-short one is a fatal boot error rather than a warning. The alternative is a
+per-boot random secret that signs every user out on every deploy - and an
+organizer mid-event will not forgive it. Set it once, keep it.
 **Rotating it signs everyone out and invalidates salted vote IP hashes.**
+
+To override the compose default without editing the file, set `SESSION_SECRET` in
+the environment before `docker compose up`, or put it in a `.env` beside the
+compose file - compose reads one automatically and its values take precedence
+over the ones written in the service block.
 
 ### The image
 
@@ -63,7 +88,7 @@ accepting:
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `SESSION_SECRET` | none | Required in production. 32+ characters. |
+| `SESSION_SECRET` | none in the app; a **published demo constant** in `docker-compose.yml` | Required in production. 32+ characters. The compose default exists so `docker compose up` works with no `.env`; it is public and must be overridden for a real event. |
 | `PUBLIC_URL` | `http://localhost:8080` | Used for links, and decides the Origin check. |
 | `AUTO_SEED` | `true` (non-test) | **Set false for a real event.** |
 | `AUTO_MIGRATE` | `true` | Migrations are transactional and refuse to run if an applied one was edited. |

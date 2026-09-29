@@ -25,6 +25,70 @@ const Paging = z.object({
   page: z.coerce.number().int().min(1).default(1),
   perPage: z.coerce.number().int().min(1).max(200).default(25),
 });
+
+/*
+ * Query schemas, named and shared between the handler that enforces them and
+ * the registry that documents them. See the note in `routes.ts` for why these
+ * are constants rather than inline expressions.
+ */
+const RegistrationListQuery = z
+  .object({
+    state: z.enum(['APPLICATION', 'PENDING', 'ACCEPTED', 'REJECTED', 'WAITLISTED', 'WITHDRAWN']).optional(),
+    search: z.string().max(100).optional(),
+  })
+  .merge(Paging);
+const TeamListQuery = z.object({ search: z.string().max(100).optional() }).merge(Paging);
+const SubmissionListQuery = z
+  .object({
+    state: z.enum(['DRAFT', 'SUBMITTED', 'LOCKED', 'JUDGING', 'FINALIZED']).optional(),
+    trackId: Id.optional(),
+    teamId: Id.optional(),
+    search: z.string().max(100).optional(),
+  })
+  .merge(Paging);
+const GalleryQuery = z
+  .object({
+    search: z.string().max(100).optional().describe('Free text over project name, description and technologies.'),
+    trackId: Id.optional().describe('Restrict to one track.'),
+    technology: z.string().max(60).optional().describe('Restrict to one technology, as listed by the facets endpoint.'),
+    teamId: Id.optional().describe('Restrict to one team.'),
+    sort: z
+      .enum(['GALLERY', 'NAME', 'SUBMISSION', 'VOTES'])
+      .optional()
+      .describe('GALLERY is the event\'s configured order, which is randomized per event per day.'),
+  })
+  .merge(Paging);
+const EmbedQuery = z.object({
+  limit: z.coerce.number().int().min(1).max(200).default(24).describe('How many projects to include. Capped at 200.'),
+});
+const JudgeListQuery = z
+  .object({
+    state: z.enum(['INVITED', 'ACCEPTED', 'ACTIVE', 'COMPLETED']).optional(),
+    search: z.string().max(100).optional(),
+  })
+  .merge(Paging);
+const ConflictListQuery = z.object({ judgeId: Id.optional(), projectId: Id.optional() });
+const AssignmentListQuery = z
+  .object({ judgeId: Id.optional(), submissionId: Id.optional(), status: z.string().max(20).optional() })
+  .merge(Paging);
+const PairwiseQueueQuery = z.object({
+  pairs: z.coerce.number().int().min(1).max(200).default(20).describe('How many head-to-head pairs to return.'),
+});
+const DeliveryHistoryQuery = z.object({
+  limit: z.coerce.number().int().min(1).max(500).default(50).describe('How many deliveries to return, newest first.'),
+});
+const AuditQuery = z
+  .object({
+    action: z.string().max(60).optional().describe('Exact action, e.g. results.published.'),
+    actionPrefix: z.string().max(60).optional().describe('Any action beginning with this prefix.'),
+    resourceType: z.string().max(40).optional(),
+    resourceId: z.string().max(64).optional(),
+    outcome: z.enum(['SUCCESS', 'DENIED', 'FAILED']).optional().describe('DENIED includes every permission refusal, so "nobody tried that" is answerable.'),
+    actorId: Id.optional(),
+    from: z.string().max(40).optional().describe('ISO-8601 lower bound.'),
+    to: z.string().max(40).optional().describe('ISO-8601 upper bound.'),
+  })
+  .merge(Paging);
 type Services = import('../services/context.ts').Services;
 
 function ctx(request: { ctx: import('../lib/auth.ts').RequestContext }) {
@@ -80,10 +144,10 @@ export function registerRegistrationRoutes(app: FastifyInstance, services: Servi
     return reply.status(201).send(services.registrations.addField(eventId, body, ctx(request)));
   });
   registry.register({
-    method: 'POST', path: '/api/events/{eventId}/registration/form/fields', tags: ['registration'], auth: 'organizer',
+    method: 'POST', path: '/api/events/{eventId}/registration/form/fields', success: 201,
+    tags: ['registration'], auth: 'organizer',
     summary: 'Add a field to the application form.', permission: { resource: 'registration', action: 'create' },
   });
-
   app.delete('/api/events/:eventId/registration/form/fields/:fieldId', async (request, reply) => {
     const params = z.object({ eventId: Id, fieldId: Id }).parse(request.params);
     const eventId = eventIdOf(services, params.eventId);
@@ -91,8 +155,8 @@ export function registerRegistrationRoutes(app: FastifyInstance, services: Servi
     services.registrations.deleteField(eventId, params.fieldId, ctx(request));
     return reply.status(204).send();
   });
-  registry.register({ method: 'DELETE', path: '/api/events/{eventId}/registration/form/fields/{fieldId}', tags: ['registration'], auth: 'organizer', summary: 'Remove a form field.', permission: { resource: 'registration', action: 'delete' } });
-
+  registry.register({ method: 'DELETE', path: '/api/events/{eventId}/registration/form/fields/{fieldId}', success: 204,
+    tags: ['registration'], auth: 'organizer', summary: 'Remove a form field.', permission: { resource: 'registration', action: 'delete' } });
   app.post('/api/events/:eventId/registration', async (request, reply) => {
     const params = z.object({ eventId: Id }).parse(request.params);
     if (request.ctx.user === null) throw errors.unauthenticated();
@@ -110,12 +174,12 @@ export function registerRegistrationRoutes(app: FastifyInstance, services: Servi
     return reply.status(201).send({ ...registration, responses: services.registrations.responses(registration.id) });
   });
   registry.register({
-    method: 'POST', path: '/api/events/{eventId}/registration', tags: ['registration'], auth: 'session',
+    method: 'POST', path: '/api/events/{eventId}/registration', success: 201,
+    tags: ['registration'], auth: 'session',
     summary: 'Apply to take part.', permission: { resource: 'registration', action: 'create' },
     description: 'Idempotent per event: applying again updates the existing application rather than creating a duplicate.',
     errors: ['WINDOW_CLOSED', 'VALIDATION_FAILED', 'CONFLICT'],
   });
-
   app.get('/api/events/:eventId/registration/me', async (request) => {
     const params = z.object({ eventId: Id }).parse(request.params);
     if (request.ctx.user === null) throw errors.unauthenticated();
@@ -128,7 +192,7 @@ export function registerRegistrationRoutes(app: FastifyInstance, services: Servi
 
   app.get('/api/events/:eventId/registrations', async (request) => {
     const params = z.object({ eventId: Id }).parse(request.params);
-    const query = z.object({ state: z.enum(['APPLICATION', 'PENDING', 'ACCEPTED', 'REJECTED', 'WAITLISTED', 'WITHDRAWN']).optional(), search: z.string().max(100).optional() }).merge(Paging).parse(request.query);
+    const query = RegistrationListQuery.parse(request.query);
     const eventId = eventIdOf(services, params.eventId);
     requirePermission(services, request.ctx, 'registration', 'read', { inOrganizedEvent: canManageEvent(request.ctx.actor, eventId) }, { eventId, resourceType: 'registration' });
     const paging = normalisePaging(query);
@@ -140,7 +204,7 @@ export function registerRegistrationRoutes(app: FastifyInstance, services: Servi
     };
   });
   registry.register({
-    method: 'GET', path: '/api/events/{eventId}/registrations', tags: ['registration'], auth: 'organizer',
+    method: 'GET', path: '/api/events/{eventId}/registrations', tags: ['registration'], auth: 'organizer', querystring: RegistrationListQuery,
     summary: 'The organizer\'s applicant queue, with per-state counts.',
     permission: { resource: 'registration', action: 'read' },
   });
@@ -198,11 +262,11 @@ export function registerTeamRoutes(app: FastifyInstance, services: Services, reg
     const team = services.teams.create(eventId, body, ctx(request));
     return reply.status(201).send({ ...team, members: services.teams.members(team.id) });
   });
-  registry.register({ method: 'POST', path: '/api/events/{eventId}/teams', tags: ['teams'], auth: 'session', summary: 'Create a team (you become the captain).', permission: { resource: 'team', action: 'create' } });
-
+  registry.register({ method: 'POST', path: '/api/events/{eventId}/teams', success: 201,
+    tags: ['teams'], auth: 'session', summary: 'Create a team (you become the captain).', permission: { resource: 'team', action: 'create' } });
   app.get('/api/events/:eventId/teams', async (request) => {
     const params = z.object({ eventId: Id }).parse(request.params);
-    const query = z.object({ search: z.string().max(100).optional() }).merge(Paging).parse(request.query);
+    const query = TeamListQuery.parse(request.query);
     const eventId = eventIdOf(services, params.eventId);
     const paging = normalisePaging(query);
     const result = services.teams.list(eventId, { ...(query.search ? { search: query.search } : {}), limit: paging.limit, offset: paging.offset });
@@ -211,7 +275,7 @@ export function registerTeamRoutes(app: FastifyInstance, services: Services, reg
       pagination: { page: paging.page, perPage: paging.perPage, total: result.total, totalPages: Math.ceil(result.total / paging.perPage), hasMore: paging.offset + paging.limit < result.total },
     };
   });
-  registry.register({ method: 'GET', path: '/api/events/{eventId}/teams', tags: ['teams'], auth: 'none', summary: 'List teams.' });
+  registry.register({ method: 'GET', path: '/api/events/{eventId}/teams', tags: ['teams'], auth: 'none', summary: 'List teams.', querystring: TeamListQuery });
 
   app.get('/api/events/:eventId/teams/mine', async (request) => {
     const params = z.object({ eventId: Id }).parse(request.params);
@@ -249,8 +313,8 @@ export function registerTeamRoutes(app: FastifyInstance, services: Services, reg
     const invitation = services.teams.invite(params.teamId, body, ctx(request));
     return reply.status(201).send({ ...invitation, url: `${services.config.publicUrl}/invite/${(invitation as { code: string }).code}` });
   });
-  registry.register({ method: 'POST', path: '/api/teams/{teamId}/invitations', tags: ['teams'], auth: 'session', summary: 'Invite someone to your team.', permission: { resource: 'team', action: 'update' } });
-
+  registry.register({ method: 'POST', path: '/api/teams/{teamId}/invitations', success: 201,
+    tags: ['teams'], auth: 'session', summary: 'Invite someone to your team.', permission: { resource: 'team', action: 'update' } });
   app.get('/api/invitations/:code', async (request) => {
     const params = z.object({ code: z.string().min(4).max(16) }).parse(request.params);
     const invitation = services.teams.findInvitationByCode(params.code);
@@ -296,8 +360,8 @@ export function registerTeamRoutes(app: FastifyInstance, services: Services, reg
     services.teams.removeMember(team.id, params.userId, ctx(request));
     return reply.status(204).send();
   });
-  registry.register({ method: 'DELETE', path: '/api/teams/{teamId}/members/{userId}', tags: ['teams'], auth: 'session', summary: 'Leave a team or remove a member.', permission: { resource: 'team', action: 'delete' } });
-
+  registry.register({ method: 'DELETE', path: '/api/teams/{teamId}/members/{userId}', success: 204,
+    tags: ['teams'], auth: 'session', summary: 'Leave a team or remove a member.', permission: { resource: 'team', action: 'delete' } });
   app.post('/api/teams/:teamId/captain/:userId', async (request) => {
     const params = z.object({ teamId: Id, userId: Id }).parse(request.params);
     requirePermission(services, request.ctx, 'team', 'update', { ownerId: services.teams.require(params.teamId).captain_id }, { resourceType: 'team', resourceId: params.teamId });
@@ -350,15 +414,15 @@ export function registerSubmissionRoutes(app: FastifyInstance, services: Service
     return reply.status(201).send(serializeProject(submission));
   });
   registry.register({
-    method: 'POST', path: '/api/events/{eventId}/submissions', tags: ['submissions'], auth: 'session',
+    method: 'POST', path: '/api/events/{eventId}/submissions', success: 201,
+    tags: ['submissions'], auth: 'session',
     summary: 'Start a draft submission.', permission: { resource: 'submission', action: 'create' },
     description: 'Creates a DRAFT. Drafts can be saved right up to the deadline; completeness is checked at submit time, not save time.',
     errors: ['CONFLICT', 'FORBIDDEN', 'VALIDATION_FAILED'],
   });
-
   app.get('/api/events/:eventId/submissions', async (request) => {
     const params = z.object({ eventId: Id }).parse(request.params);
-    const query = z.object({ state: z.enum(['DRAFT', 'SUBMITTED', 'LOCKED', 'JUDGING', 'FINALIZED']).optional(), trackId: Id.optional(), teamId: Id.optional(), search: z.string().max(100).optional() }).merge(Paging).parse(request.query);
+    const query = SubmissionListQuery.parse(request.query);
     const eventId = eventIdOf(services, params.eventId);
     const paging = normalisePaging(query);
     const isManager = canManageEvent(request.ctx.actor, eventId);
@@ -372,7 +436,7 @@ export function registerSubmissionRoutes(app: FastifyInstance, services: Service
       pagination: { page: paging.page, perPage: paging.perPage, total: result.total, totalPages: Math.ceil(result.total / paging.perPage), hasMore: paging.offset + paging.limit < result.total },
     };
   });
-  registry.register({ method: 'GET', path: '/api/events/{eventId}/submissions', tags: ['submissions'], auth: 'organizer', summary: 'The organizer\'s submission list.', permission: { resource: 'submission', action: 'read' } });
+  registry.register({ method: 'GET', path: '/api/events/{eventId}/submissions', tags: ['submissions'], auth: 'organizer', summary: 'The organizer\'s submission list.', querystring: SubmissionListQuery, permission: { resource: 'submission', action: 'read' } });
 
   app.get('/api/submissions/:submissionId', async (request) => {
     const params = z.object({ submissionId: Id }).parse(request.params);
@@ -468,7 +532,7 @@ export function registerSubmissionRoutes(app: FastifyInstance, services: Service
 export function registerGalleryRoutes(app: FastifyInstance, services: Services, registry: RouteRegistry): void {
   app.get('/api/events/:eventId/gallery', async (request) => {
     const params = z.object({ eventId: Id }).parse(request.params);
-    const query = z.object({ search: z.string().max(100).optional(), trackId: Id.optional(), technology: z.string().max(60).optional(), teamId: Id.optional(), sort: z.enum(['GALLERY', 'NAME', 'SUBMISSION', 'VOTES']).optional() }).merge(Paging).parse(request.query);
+    const query = GalleryQuery.parse(request.query);
     const eventId = eventIdOf(services, params.eventId);
     const paging = normalisePaging(query);
     return services.gallery.list(eventId, {
@@ -482,7 +546,7 @@ export function registerGalleryRoutes(app: FastifyInstance, services: Services, 
     }, ctx(request));
   });
   registry.register({
-    method: 'GET', path: '/api/events/{eventId}/gallery', tags: ['submissions'], auth: 'none',
+    method: 'GET', path: '/api/events/{eventId}/gallery', tags: ['submissions'], auth: 'none', querystring: GalleryQuery,
     summary: 'The public project gallery: search, track and technology filters, pagination.',
     description: 'Randomized ordering is seeded per event per day, so the sequence is stable for a visitor\'s whole day yet differs between days and events.',
   });
@@ -504,7 +568,7 @@ export function registerGalleryRoutes(app: FastifyInstance, services: Services, 
     // `request.params` meant the default always won and `?limit=` was silently
     // ignored - a schema that looks like a query contract and is not one.
     const params = z.object({ eventId: Id }).parse(request.params);
-    const query = z.object({ limit: z.coerce.number().int().min(1).max(200).default(24) }).parse(request.query);
+    const query = EmbedQuery.parse(request.query);
     const payload = services.gallery.embedPayload(eventIdOf(services, params.eventId), query.limit, ctx(request));
     /*
      * The content type is stated rather than left to Fastify.
@@ -523,7 +587,7 @@ export function registerGalleryRoutes(app: FastifyInstance, services: Services, 
       .send(payload);
   });
   registry.register({
-    method: 'GET', path: '/api/embed/{eventId}.json', tags: ['submissions'], auth: 'none',
+    method: 'GET', path: '/api/embed/{eventId}.json', tags: ['submissions'], auth: 'none', querystring: EmbedQuery,
     summary: 'Compact JSON for the embeddable widget.',
     description: 'Deliberately CORS-open so an external event site can fetch it, and deliberately small: only fields a card needs. Vote totals are omitted when the event hides them.',
   });
@@ -553,12 +617,12 @@ export function registerUploadRoutes(app: FastifyInstance, services: Services, r
     return reply.status(201).send({ id: upload.id, url: `/api/uploads/${upload.id}`, width: upload.width, height: upload.height, byteSize: upload.byte_size });
   });
   registry.register({
-    method: 'POST', path: '/api/submissions/{submissionId}/uploads', tags: ['uploads'], auth: 'session',
+    method: 'POST', path: '/api/submissions/{submissionId}/uploads', success: 201, multipart: true,
+    tags: ['uploads'], auth: 'session',
     summary: 'Attach a screenshot.', permission: { resource: 'upload', action: 'create' },
     description: 'PNG/JPEG/WEBP/GIF only. The declared type, the file extension and the file\'s magic bytes must all agree, so renaming a script to .png is refused. SVG is rejected outright as a script vector.',
     errors: ['UNSUPPORTED_MEDIA_TYPE', 'PAYLOAD_TOO_LARGE', 'FORBIDDEN'],
   });
-
   app.get('/api/uploads/:uploadId', async (request, reply) => {
     const params = z.object({ uploadId: Id }).parse(request.params);
     const upload = services.uploads.findById(params.uploadId);
@@ -602,7 +666,8 @@ export function registerUploadRoutes(app: FastifyInstance, services: Services, r
     await services.uploads.remove(upload.id, ctx(request));
     return reply.status(204).send();
   });
-  registry.register({ method: 'DELETE', path: '/api/uploads/{uploadId}', tags: ['uploads'], auth: 'session', summary: 'Delete a file.', permission: { resource: 'upload', action: 'delete' } });
+  registry.register({ method: 'DELETE', path: '/api/uploads/{uploadId}', success: 204,
+    tags: ['uploads'], auth: 'session', summary: 'Delete a file.', permission: { resource: 'upload', action: 'delete' } });
 }
 
 /* ================================================================ judging */
@@ -618,14 +683,14 @@ export function registerJudgingRoutes(app: FastifyInstance, services: Services, 
     return reply.status(201).send(result);
   });
   registry.register({
-    method: 'POST', path: '/api/events/{eventId}/judges/invite', tags: ['judges'], auth: 'organizer',
+    method: 'POST', path: '/api/events/{eventId}/judges/invite', success: 201,
+    tags: ['judges'], auth: 'organizer',
     summary: 'Invite judges by email or username.', permission: { resource: 'judge', action: 'create' },
     description: 'Each identifier is handled independently, so one unknown address does not abort the batch. The response lists exactly who was invited and who was skipped and why.',
   });
-
   app.get('/api/events/:eventId/judges', async (request) => {
     const params = z.object({ eventId: Id }).parse(request.params);
-    const query = z.object({ state: z.enum(['INVITED', 'ACCEPTED', 'ACTIVE', 'COMPLETED']).optional(), search: z.string().max(100).optional() }).merge(Paging).parse(request.query);
+    const query = JudgeListQuery.parse(request.query);
     const eventId = eventIdOf(services, params.eventId);
     requirePermission(services, request.ctx, 'judge', 'read', { inOrganizedEvent: canManageEvent(request.ctx.actor, eventId) }, { eventId, resourceType: 'judge' });
     const paging = normalisePaging(query);
@@ -636,7 +701,7 @@ export function registerJudgingRoutes(app: FastifyInstance, services: Services, 
       pagination: { page: paging.page, perPage: paging.perPage, total: result.total, totalPages: Math.ceil(result.total / paging.perPage), hasMore: paging.offset + paging.limit < result.total },
     };
   });
-  registry.register({ method: 'GET', path: '/api/events/{eventId}/judges', tags: ['judges'], auth: 'organizer', summary: 'The panel, with per-judge workload and progress.', permission: { resource: 'judge', action: 'read' } });
+  registry.register({ method: 'GET', path: '/api/events/{eventId}/judges', tags: ['judges'], auth: 'organizer', summary: 'The panel, with per-judge workload and progress.', querystring: JudgeListQuery, permission: { resource: 'judge', action: 'read' } });
 
   app.post('/api/judges/:judgeId/accept', async (request) => {
     const params = z.object({ judgeId: Id }).parse(request.params);
@@ -680,20 +745,20 @@ export function registerJudgingRoutes(app: FastifyInstance, services: Services, 
     return reply.status(201).send(conflict);
   });
   registry.register({
-    method: 'POST', path: '/api/events/{eventId}/conflicts', tags: ['judges'], auth: 'session',
+    method: 'POST', path: '/api/events/{eventId}/conflicts', success: 201,
+    tags: ['judges'], auth: 'session',
     summary: 'Declare a conflict of interest.',
     description: 'Anyone may declare a conflict against themselves, at any time, including after judging started — blocking it would only encourage concealment. A HARD conflict is never assigned by the engine under any strategy; an organizer who truly must proceed uses the separate, confirmed, audited conflict-override path.',
     errors: ['VALIDATION_FAILED', 'FORBIDDEN'],
   });
-
   app.get('/api/events/:eventId/conflicts', async (request) => {
     const params = z.object({ eventId: Id }).parse(request.params);
-    const query = z.object({ judgeId: Id.optional(), projectId: Id.optional() }).parse(request.query);
+    const query = ConflictListQuery.parse(request.query);
     const eventId = eventIdOf(services, params.eventId);
     requirePermission(services, request.ctx, 'conflict', 'read', { inOrganizedEvent: canManageEvent(request.ctx.actor, eventId) }, { eventId, resourceType: 'conflict' });
     return { data: services.judges.listConflicts(eventId, query) };
   });
-  registry.register({ method: 'GET', path: '/api/events/{eventId}/conflicts', tags: ['judges'], auth: 'organizer', summary: 'The conflict register.', permission: { resource: 'conflict', action: 'read' } });
+  registry.register({ method: 'GET', path: '/api/events/{eventId}/conflicts', tags: ['judges'], auth: 'organizer', summary: 'The conflict register.', querystring: ConflictListQuery, permission: { resource: 'conflict', action: 'read' } });
 
   app.delete('/api/conflicts/:conflictId', async (request, reply) => {
     const params = z.object({ conflictId: Id }).parse(request.params);
@@ -703,8 +768,8 @@ export function registerJudgingRoutes(app: FastifyInstance, services: Services, 
     services.judges.removeConflict(params.conflictId, ctx(request));
     return reply.status(204).send();
   });
-  registry.register({ method: 'DELETE', path: '/api/conflicts/{conflictId}', tags: ['judges'], auth: 'session', summary: 'Withdraw a conflict declaration (audited).', permission: { resource: 'conflict', action: 'delete' } });
-
+  registry.register({ method: 'DELETE', path: '/api/conflicts/{conflictId}', success: 204,
+    tags: ['judges'], auth: 'session', summary: 'Withdraw a conflict declaration (audited).', permission: { resource: 'conflict', action: 'delete' } });
   // ---- assignments
   app.post('/api/events/:eventId/assignments/preview', async (request) => {
     const params = z.object({ eventId: Id }).parse(request.params);
@@ -766,7 +831,7 @@ export function registerJudgingRoutes(app: FastifyInstance, services: Services, 
 
   app.get('/api/events/:eventId/assignments', async (request) => {
     const params = z.object({ eventId: Id }).parse(request.params);
-    const query = z.object({ judgeId: Id.optional(), submissionId: Id.optional(), status: z.string().max(20).optional() }).merge(Paging).parse(request.query);
+    const query = AssignmentListQuery.parse(request.query);
     const eventId = eventIdOf(services, params.eventId);
     requirePermission(services, request.ctx, 'assignment', 'read', { inOrganizedEvent: canManageEvent(request.ctx.actor, eventId) }, { eventId, resourceType: 'assignment' });
     const paging = normalisePaging(query);
@@ -778,7 +843,7 @@ export function registerJudgingRoutes(app: FastifyInstance, services: Services, 
       pagination: { page: paging.page, perPage: paging.perPage, total: result.total, totalPages: Math.ceil(result.total / paging.perPage), hasMore: paging.offset + paging.limit < result.total },
     };
   });
-  registry.register({ method: 'GET', path: '/api/events/{eventId}/assignments', tags: ['assignments'], auth: 'organizer', summary: 'Committed assignments and per-project coverage.', permission: { resource: 'assignment', action: 'read' } });
+  registry.register({ method: 'GET', path: '/api/events/{eventId}/assignments', tags: ['assignments'], auth: 'organizer', summary: 'Committed assignments and per-project coverage.', querystring: AssignmentListQuery, permission: { resource: 'assignment', action: 'read' } });
 
   app.post('/api/assignments/:assignmentId/reassign', async (request) => {
     const params = z.object({ assignmentId: Id }).parse(request.params);
@@ -844,12 +909,12 @@ export function registerJudgingRoutes(app: FastifyInstance, services: Services, 
     return reply.status(201).send({ ...version, criteria: services.rubrics.criteria(version.id) });
   });
   registry.register({
-    method: 'POST', path: '/api/events/{eventId}/rubrics', tags: ['rubrics'], auth: 'organizer',
+    method: 'POST', path: '/api/events/{eventId}/rubrics', success: 201,
+    tags: ['rubrics'], auth: 'organizer',
     summary: 'Create a rubric and activate version 1.', permission: { resource: 'rubric', action: 'create' },
     description: 'Weights must be fractions summing to 1.0 (30% is written 0.30); every criterion needs max > min; at least one criterion must be required. Invalid rubrics are rejected before anything is written.',
     errors: ['VALIDATION_FAILED', 'IMMUTABLE'],
   });
-
   app.get('/api/rubrics/:rubricId/versions', async (request) => {
     const params = z.object({ rubricId: Id }).parse(request.params);
     const rubric = services.db.get<{ event_id: string }>('SELECT event_id FROM rubrics WHERE id = :id', { id: params.rubricId });
@@ -881,8 +946,8 @@ export function registerJudgingRoutes(app: FastifyInstance, services: Services, 
     const version = services.rubrics.createVersion(params.rubricId, body, ctx(request));
     return reply.status(201).send({ ...version, criteria: services.rubrics.criteria(version.id) });
   });
-  registry.register({ method: 'POST', path: '/api/rubrics/{rubricId}/versions', tags: ['rubrics'], auth: 'organizer', summary: 'Add a rubric version. The previous one is retained unchanged.', permission: { resource: 'rubric', action: 'create' }, errors: ['IMMUTABLE'] });
-
+  registry.register({ method: 'POST', path: '/api/rubrics/{rubricId}/versions', success: 201,
+    tags: ['rubrics'], auth: 'organizer', summary: 'Add a rubric version. The previous one is retained unchanged.', permission: { resource: 'rubric', action: 'create' }, errors: ['IMMUTABLE'] });
   app.patch('/api/rubric-versions/:versionId', async (request) => {
     const params = z.object({ versionId: Id }).parse(request.params);
     const version = services.rubrics.requireVersion(params.versionId);
@@ -995,7 +1060,7 @@ export function registerJudgingRoutes(app: FastifyInstance, services: Services, 
     // `pairs` is a query parameter; reading it from the path meant `?pairs=` was
     // silently ignored and the queue was always 20 long.
     const params = z.object({ eventId: Id }).parse(request.params);
-    const query = z.object({ pairs: z.coerce.number().int().min(1).max(200).default(20) }).parse(request.query);
+    const query = PairwiseQueueQuery.parse(request.query);
     const eventId = eventIdOf(services, params.eventId);
     if (request.ctx.user === null) throw errors.unauthenticated();
     const judge = services.judges.findByUser(eventId, request.ctx.user.id);
@@ -1004,7 +1069,7 @@ export function registerJudgingRoutes(app: FastifyInstance, services: Services, 
     return services.scoring.pairwiseQueue(eventId, judge.id, query.pairs, ctx(request));
   });
   registry.register({
-    method: 'GET', path: '/api/events/{eventId}/pairwise/queue', tags: ['scoring'], auth: 'session',
+    method: 'GET', path: '/api/events/{eventId}/pairwise/queue', tags: ['scoring'], auth: 'session', querystring: PairwiseQueueQuery,
     summary: 'Your head-to-head comparison queue.',
     permission: { resource: 'pairwise', action: 'read' },
     description: 'A deterministic round-robin over the projects assigned to you, shuffled with a per-judge seed so a judge can resume where they left off while different judges see different pairings and orientations.',
@@ -1019,11 +1084,11 @@ export function registerJudgingRoutes(app: FastifyInstance, services: Services, 
     return reply.status(201).send(services.scoring.recordComparison(eventId, body, ctx(request)));
   });
   registry.register({
-    method: 'POST', path: '/api/events/{eventId}/pairwise', tags: ['scoring'], auth: 'session',
+    method: 'POST', path: '/api/events/{eventId}/pairwise', success: 201,
+    tags: ['scoring'], auth: 'session',
     summary: 'Record a head-to-head comparison.', permission: { resource: 'pairwise', action: 'create' },
     description: 'Only projects assigned to you may be compared, which stops a judge ranking work they never reviewed.',
   });
-
   // ---- calibration
   app.post('/api/events/:eventId/calibration', async (request, reply) => {
     const params = z.object({ eventId: Id }).parse(request.params);
@@ -1032,8 +1097,8 @@ export function registerJudgingRoutes(app: FastifyInstance, services: Services, 
     const body = z.object({ name: z.string().min(2).max(120), instructions: z.string().max(4000).optional(), submissionIds: z.array(Id).min(1).max(20), opensAt: z.string().max(40).optional(), closesAt: z.string().max(40).optional() }).parse(request.body);
     return reply.status(201).send(services.scoring.createCalibration(eventId, body, ctx(request)));
   });
-  registry.register({ method: 'POST', path: '/api/events/{eventId}/calibration', tags: ['calibration'], auth: 'organizer', summary: 'Open a calibration session on example projects.', permission: { resource: 'calibration', action: 'create' } });
-
+  registry.register({ method: 'POST', path: '/api/events/{eventId}/calibration', success: 201,
+    tags: ['calibration'], auth: 'organizer', summary: 'Open a calibration session on example projects.', permission: { resource: 'calibration', action: 'create' } });
   app.post('/api/calibration/:sessionId/scores', async (request) => {
     const params = z.object({ sessionId: Id }).parse(request.params);
     const body = z.object({ submissionId: Id, criteria: z.array(z.object({ criterionId: Id, value: z.number(), comment: z.string().max(4000).nullable().optional() })).min(1).max(40) }).parse(request.body);
@@ -1111,12 +1176,12 @@ export function registerResultRoutes(app: FastifyInstance, services: Services, r
     return reply.status(201).send(snapshot);
   });
   registry.register({
-    method: 'POST', path: '/api/events/{eventId}/results/{runId}/snapshot', tags: ['results'], auth: 'organizer',
+    method: 'POST', path: '/api/events/{eventId}/results/{runId}/snapshot', success: 201,
+    tags: ['results'], auth: 'organizer',
     summary: 'Freeze a computed run as an immutable snapshot.',
     permission: { resource: 'result', action: 'create' },
     description: 'Snapshots are sequenced and append-only. A correction creates a new snapshot that supersedes the old one; database triggers refuse to modify or delete a published snapshot.',
   });
-
   app.post('/api/events/:eventId/results/snapshots/:snapshotId/publish', async (request) => {
     const params = z.object({ eventId: Id, snapshotId: Id }).parse(request.params);
     const eventId = eventIdOf(services, params.eventId);
@@ -1239,13 +1304,13 @@ export function registerCommunityRoutes(app: FastifyInstance, services: Services
     return reply.status(201).send(services.community.castVote(eventId, body.submissionId, ctx(request)));
   });
   registry.register({
-    method: 'POST', path: '/api/events/{eventId}/votes', tags: ['community'], auth: 'session',
+    method: 'POST', path: '/api/events/{eventId}/votes', success: 201,
+    tags: ['community'], auth: 'session',
     summary: 'Vote for a project. One vote per account per project.',
     permission: { resource: 'vote', action: 'create' },
     description: 'Layered defences: authentication, registration eligibility, no self-voting through team membership, a UNIQUE constraint per (event, project, account), a per-account hourly rate limit and a server-side window. Voting again is a no-op, not a second vote.',
     errors: ['WINDOW_CLOSED', 'CONFLICT_OF_INTEREST', 'FORBIDDEN', 'RATE_LIMITED'],
   });
-
   app.delete('/api/events/:eventId/votes/:submissionId', async (request) => {
     const params = z.object({ eventId: Id, submissionId: Id }).parse(request.params);
     if (request.ctx.actor === null) throw errors.unauthenticated();
@@ -1282,13 +1347,13 @@ export function registerCommunityRoutes(app: FastifyInstance, services: Services
      * the rest. A project with a long thread simply had no accessible tail.
      */
     const params = z.object({ submissionId: Id }).parse(request.params);
-    const query = z.object({}).merge(Paging).parse(request.query);
+    const query = Paging.parse(request.query);
     const submission = services.submissions.require(params.submissionId);
     const paging = normalisePaging(query);
     return services.community.listComments(submission.event_id, submission.id, { limit: paging.limit, offset: paging.offset, includeHidden: canManageEvent(request.ctx.actor, submission.event_id) }, ctx(request));
   });
   registry.register({
-    method: 'GET', path: '/api/submissions/{submissionId}/comments', tags: ['community'], auth: 'none',
+    method: 'GET', path: '/api/submissions/{submissionId}/comments', tags: ['community'], auth: 'none', querystring: Paging,
     summary: 'Comments on a project.',
     description: 'Paged with `page` and `perPage`. Hidden comments are included only for organizers.',
   });
@@ -1302,11 +1367,11 @@ export function registerCommunityRoutes(app: FastifyInstance, services: Services
     return reply.status(201).send(services.community.createComment(submission.event_id, submission.id, body, ctx(request)));
   });
   registry.register({
-    method: 'POST', path: '/api/submissions/{submissionId}/comments', tags: ['community'], auth: 'session',
+    method: 'POST', path: '/api/submissions/{submissionId}/comments', success: 201,
+    tags: ['community'], auth: 'session',
     summary: 'Post a comment.', permission: { resource: 'comment', action: 'create' },
     description: 'A first comment from a new account is held for approval. That is the only pre-moderation rule: it blunts drive-by spam without making every commenter from a newcomer wait.',
   });
-
   app.delete('/api/comments/:commentId', async (request) => {
     const params = z.object({ commentId: Id }).parse(request.params);
     const row = services.db.get<{ event_id: string }>('SELECT event_id FROM comments WHERE id = :id', { id: params.commentId });
@@ -1346,8 +1411,8 @@ export function registerCertificateRoutes(app: FastifyInstance, services: Servic
     const certificate = services.certificates.issue(eventId, body, ctx(request));
     return reply.status(201).send({ ...certificate, url: `${services.config.publicUrl}/certificates/${certificate.reference}` });
   });
-  registry.register({ method: 'POST', path: '/api/events/{eventId}/certificates', tags: ['certificates'], auth: 'organizer', summary: 'Issue one certificate.', permission: { resource: 'certificate', action: 'create' } });
-
+  registry.register({ method: 'POST', path: '/api/events/{eventId}/certificates', success: 201,
+    tags: ['certificates'], auth: 'organizer', summary: 'Issue one certificate.', permission: { resource: 'certificate', action: 'create' } });
   app.post('/api/events/:eventId/certificates/issue-all', async (request) => {
     const params = z.object({ eventId: Id }).parse(request.params);
     const eventId = eventIdOf(services, params.eventId);
@@ -1400,12 +1465,12 @@ export function registerWebhookRoutes(app: FastifyInstance, services: Services, 
     return reply.status(201).send({ ...webhook, secret: webhook.secret });
   });
   registry.register({
-    method: 'POST', path: '/api/events/{eventId}/webhooks', tags: ['webhooks'], auth: 'organizer',
+    method: 'POST', path: '/api/events/{eventId}/webhooks', success: 201,
+    tags: ['webhooks'], auth: 'organizer',
     summary: 'Register a signed outbound webhook.', permission: { resource: 'webhook', action: 'create' },
     description: 'Private, loopback and link-local targets are refused, and the hostname is re-resolved and re-checked before every delivery, so a DNS record that starts pointing at 127.0.0.1 is caught. Redirects are not followed.',
     errors: ['VALIDATION_FAILED', 'FORBIDDEN'],
   });
-
   app.get('/api/events/:eventId/webhooks', async (request) => {
     const params = z.object({ eventId: Id }).parse(request.params);
     const eventId = eventIdOf(services, params.eventId);
@@ -1419,12 +1484,12 @@ export function registerWebhookRoutes(app: FastifyInstance, services: Services, 
     // 50, so an organizer debugging a failing receiver could not ask for more
     // history than the last 50 attempts.
     const params = z.object({ webhookId: Id }).parse(request.params);
-    const query = z.object({ limit: z.coerce.number().int().min(1).max(500).default(50) }).parse(request.query);
+    const query = DeliveryHistoryQuery.parse(request.query);
     const webhook = services.webhooks.require(params.webhookId);
     requirePermission(services, request.ctx, 'webhook', 'read', { inOrganizedEvent: canManageEvent(request.ctx.actor, webhook.event_id) }, { eventId: webhook.event_id, resourceType: 'webhook' });
     return { data: services.webhooks.deliveries(webhook.id, query.limit, ctx(request)) };
   });
-  registry.register({ method: 'GET', path: '/api/webhooks/{webhookId}/deliveries', tags: ['webhooks'], auth: 'organizer', summary: 'Delivery history with responses and errors.', permission: { resource: 'webhook', action: 'read' } });
+  registry.register({ method: 'GET', path: '/api/webhooks/{webhookId}/deliveries', tags: ['webhooks'], auth: 'organizer', summary: 'Delivery history with responses and errors.', querystring: DeliveryHistoryQuery, permission: { resource: 'webhook', action: 'read' } });
 
   app.post('/api/webhooks/deliveries/:deliveryId/redeliver', async (request) => {
     const params = z.object({ deliveryId: Id }).parse(request.params);
@@ -1445,7 +1510,8 @@ export function registerWebhookRoutes(app: FastifyInstance, services: Services, 
     services.webhooks.delete(webhook.id, ctx(request));
     return reply.status(204).send();
   });
-  registry.register({ method: 'DELETE', path: '/api/webhooks/{webhookId}', tags: ['webhooks'], auth: 'organizer', summary: 'Delete a webhook.', permission: { resource: 'webhook', action: 'delete' } });
+  registry.register({ method: 'DELETE', path: '/api/webhooks/{webhookId}', success: 204,
+    tags: ['webhooks'], auth: 'organizer', summary: 'Delete a webhook.', permission: { resource: 'webhook', action: 'delete' } });
 }
 
 /* ========================================================= transfer + ops */
@@ -1541,7 +1607,7 @@ export function registerTransferRoutes(app: FastifyInstance, services: Services,
 export function registerOpsRoutes(app: FastifyInstance, services: Services, registry: RouteRegistry): void {
   app.get('/api/events/:eventId/audit', async (request) => {
     const params = z.object({ eventId: Id }).parse(request.params);
-    const query = z.object({ action: z.string().max(60).optional(), actionPrefix: z.string().max(60).optional(), resourceType: z.string().max(40).optional(), resourceId: z.string().max(64).optional(), outcome: z.enum(['SUCCESS', 'DENIED', 'FAILED']).optional(), actorId: Id.optional(), from: z.string().max(40).optional(), to: z.string().max(40).optional() }).merge(Paging).parse(request.query);
+    const query = AuditQuery.parse(request.query);
     const eventId = eventIdOf(services, params.eventId);
     requirePermission(services, request.ctx, 'audit', 'read', { inOrganizedEvent: canManageEvent(request.ctx.actor, eventId) }, { eventId, resourceType: 'audit' });
     const paging = normalisePaging(query);
@@ -1581,7 +1647,7 @@ export function registerOpsRoutes(app: FastifyInstance, services: Services, regi
     };
   });
   registry.register({
-    method: 'GET', path: '/api/events/{eventId}/audit', tags: ['audit'], auth: 'organizer',
+    method: 'GET', path: '/api/events/{eventId}/audit', tags: ['audit'], auth: 'organizer', querystring: AuditQuery,
     summary: 'Query the append-only audit ledger, with a tamper-evidence chain digest.',
     permission: { resource: 'audit', action: 'read' },
     description: 'Database triggers make audit_events append-only. `chain.digest` is a rolling hash over the most recent entries, so an organizer can publish it and later prove no row was edited or removed.',

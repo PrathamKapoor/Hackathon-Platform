@@ -2,8 +2,7 @@
 
 Verdict — hackathon operations with an auditable judging engine.
 
-**Date of this run:** 2026-09-28
-**Commit:** `b89a971` plus this report
+**Date of this run:** 2026-09-29
 **Branch:** `main`, tracking `origin/main`
 
 ---
@@ -31,16 +30,16 @@ printed.
 | Command | Result |
 | --- | --- |
 | `npm run typecheck` | Pass. Both projects: core/api/tests/scripts, then the web app. |
-| `npm test` | **382 passed**, 0 failed, 69 suites. |
-| `npm run build` | Pass. 486.17 kB JS, 139.85 kB gzipped, 14.02 kB CSS. |
-| `npm run test:e2e` | **45 passed**, 0 failed, 8 suites, real Chrome against the built bundle. |
+| `npm test` | **441 passed**, 0 failed, 70 suites. |
+| `npm run build` | Pass. 505.46 kB JS, 146.44 kB gzipped, 16.66 kB CSS. |
+| `npm run test:e2e` | **50 passed**, 0 failed, 8 suites, real Chrome against the built bundle. |
 | `npm run acceptance` | **35 of 35 checks passed.** |
-| `npm run check:openapi` | Up to date. 140 operations across 120 paths. |
+| `npm run check:openapi` | Up to date. 144 operations across 123 paths. |
 | `npm run verify` | All of the above, in order, green. |
 | `docker build` / `docker compose up` | **NOT EXECUTED — Docker unavailable.** |
 | Multi-viewport browser check | 4 viewports × 10 surfaces, as part of `test:e2e`. |
 | Clean-database migration + seed | Covered by every test harness; each boots a fresh database. |
-| Old-schema upgrade (v11 → v14) | Covered by `migrations.test.ts`. |
+| Old-schema upgrade (v11 → v15) | Covered by `migrations.test.ts`. |
 | Backup and restore round trip | Covered by `migrations.test.ts`. |
 
 Measured on the seeded demo — 12 projects, 12 teams, 36 assignments, 24 users,
@@ -125,14 +124,21 @@ Loose upper bounds are asserted in the suite (30 s boot, 3 s gallery and queue,
 | SSRF defences on webhooks | Met | Re-resolved before every delivery; redirects refused; timeout and size cap. |
 | No dead webhook topics | Met | Ten of eleven never fired. All ten wired and each covered by a test. |
 | Authorization is one matrix | Met | 16 operations disagreed with the registry about what they enforce; documented in `docs/API.md`. |
+| Voting cannot skew the result it is supposed to inform | Met | Results are hidden while voting is open, and publication over an open window is refused server-side, not just hidden in the UI. |
+| A voter can correct themselves | Met | Vote retraction granted to the participant, and returning the same vote replaces it. |
+| Reading is not writing | Met | `GET /api/events/{eventId}/diagnostics` no longer files review flags; `POST` does, and requires `anomaly:create` rather than `diagnostic:read`. |
+| A judge's private scores stay private | Met | Found and fixed: the unauthenticated participation-record verifier returned the stored detail verbatim, which carried each project's raw score. Redacted; the hash still covers the score so tamper detection is unaffected. |
 
 ### G. Deployment and operations
 
 | Requirement | Status | Evidence |
 | --- | --- | --- |
-| Single-command self-hosting | **Static review only** | `docker compose up --build`. **NOT EXECUTED — Docker unavailable.** |
+| Single-command self-hosting | **Static review only** | `docker compose up` with **no `.env` file required**. The compose file supplies a public local-only session secret so the command works on a fresh clone; both the compose file and the README say in capitals that this is not a production secret and must be overridden. **NOT EXECUTED — Docker unavailable.** |
 | Health check that means something | Met (static) | `/api/ready`, not `/api/health`; reviewed, not run. |
 | Graceful shutdown | Met (static) | `tini` as PID 1, 20 s stop grace, app drains with its own 10 s timer. |
+| Openly licensed | Met | Full Apache-2.0 `LICENSE` with the correct copyright line. Nine of the nine required sections are asserted by `deployment.test.ts`, so a truncated or wrong-text licence fails the suite. |
+| Every declared export kind actually works | Met | All 13 CSV export kinds exercised against a seeded event, not merely listed in a manifest. |
+| Every declared import kind is implemented | Met | The `SUBMISSIONS` bulk import that the manifest advertised and the server refused is implemented, and the capability test drives a real import rather than checking a constant. |
 | Backup and restore | Met | `VACUUM INTO`, verified end to end including a published result reproducing with the same integrity hash after restore. |
 | Migrations safe to run against a live database | Met | Transactional, immutable, and an old-schema upgrade is tested with data intact. |
 | Foreign key integrity actually checked | Met | A check that could not fail (misspelled pragma, results discarded) was replaced with one that is tested against a real violation. |
@@ -143,10 +149,10 @@ Loose upper bounds are asserted in the suite (30 s boot, 3 s gallery and queue,
 | --- | --- | --- |
 | Operator documentation | Met | `OPERATIONS.md`: deploy, back up, restore, upgrade, recover, capacity, scaling. |
 | Data model | Met | `DATA-MODEL.md`, including eight known integrity gaps. |
-| Threat model | Met | `THREAT-MODEL.md`, including what is left over. |
-| API reference | Met | `API.md`, including six known defects in the published document. |
+| Threat model | Met | `THREAT-MODEL.md`: the general web surface, plus a section each on Sybil voting, ballot stuffing, submission scraping, judge collusion and deadline gaming. |
+| API reference | Met | `API.md`. The six documented defects in the published document are **fixed**, and the document is now checked against a live server by `openapi-truth.test.ts` on every `npm test`. |
 | Development guide | Met | `DEVELOPMENT.md`. |
-| Test suite | Met | 382 unit/integration, 45 browser, 35 acceptance. |
+| Test suite | Met | 441 unit/integration, 50 browser, 35 acceptance. |
 
 ---
 
@@ -161,16 +167,31 @@ Recorded because each is the kind that survives a demo and fails an event.
 4. The pairwise comparison history queried `decided_at`, a column that does not exist — a guaranteed 500 on a real event.
 5. A foreign key check in the connection constructor could not fail: the pragma was misspelled and its rows discarded by `exec`.
 6. OpenAPI generation ignored `hidden`, publishing two routes the code said to keep private.
+7. Any operation without a response schema was documented as `204 No Content` — 140 of 144. A client generated from the document could not tell a creation had happened.
+8. A route's query schema was emitted as one object-valued parameter named `query`, so the filters on roughly fifteen endpoints were documented nowhere.
+9. The document advertised an `x-request-id` header "echoed in the response" on all 144 operations, and the server echoed nothing. It also would have accepted an arbitrary unvalidated header value into every audit row, had it used the obvious Fastify option.
+10. The upload endpoint had no documented request body, because the `multipart` branch sat inside the `if (route.body)` it could only be reached from.
+11. `429` was advertised on every operation including the rate-limit-exempt health route.
+12. The published document listed no query parameters for the gallery, so `?search`, `?trackId` and `?sort` were undiscoverable.
 
 **Honesty and accessibility**
-7. Five pages put an `h3` directly under an `h1`, breaking the outline a screen reader user navigates by.
-8. Three controls were under 40 px tall on a phone, including the gallery's technology filters at 20 px.
-9. The integrations panel offered two topics that had never existed, and the server dropped them without erroring — so an organizer's webhook was quietly subscribed to less than the console said.
-10. `event.created` was offered as a webhook topic but could never be delivered: a webhook belongs to an event, so the event a subscription would name does not exist yet.
+11. Five pages put an `h3` directly under an `h1`, breaking the outline a screen reader user navigates by.
+12. Three controls were under 40 px tall on a phone, including the gallery's technology filters at 20 px.
+13. The integrations panel offered two topics that had never existed, and the server dropped them without erroring — so an organizer's webhook was quietly subscribed to less than the console said.
+14. `event.created` was offered as a webhook topic but could never be delivered: a webhook belongs to an event, so the event a subscription would name does not exist yet.
+15. The landing page's normalization demonstration recomputed a simplified pipeline, so the most important claim on the page was not the real algorithm. It now runs the real stages through a browser-safe port, with parity asserted for all 23 slider settings.
+16. The unauthenticated participation-record verifier returned the stored detail verbatim, including each judge's individual raw score. Anyone holding a `JPR-` reference could read a judge's private scoring. Redacted; the hash still covers the score, so tamper detection is unchanged.
+17. `GET /api/events/{eventId}/diagnostics` filed review flags as a side effect of a read. The read is now pure and `POST` does the filing, under a different permission.
+18. Results were visible during an open voting window, and publication only checked this in the UI.
+19. A participant could not retract a vote.
 
 **Deployment**
-11. The health check used an endpoint that returns 200 with a corrupt database, so a broken container would be reported healthy and never restarted.
-12. Docker's default 10-second stop grace raced the app's own 10-second force-exit timer, so containers were usually `SIGKILL`ed mid-checkpoint.
+20. The health check used an endpoint that returns 200 with a corrupt database, so a broken container would be reported healthy and never restarted.
+21. Docker's default 10-second stop grace raced the app's own 10-second force-exit timer, so containers were usually `SIGKILL`ed mid-checkpoint.
+22. `docker compose up` required a `.env` file that the repository did not ship, so the single-command claim failed on a fresh clone.
+23. There was no licence file, so an "open-source" claim had nothing behind it.
+24. `SUBMISSIONS` appeared in the advertised import kinds and was refused by the server.
+25. Nine of the thirteen declared CSV export kinds were not implemented or would have written an empty file.
 
 ---
 
@@ -197,20 +218,31 @@ Stated rather than hidden. None is a surprise; all are recorded in the docs.
   cookie is a complete session.
 - `style-src 'unsafe-inline'` remains, because React inline styles require it.
   A gap for style, not for script.
-- `GET /api/events/{eventId}/diagnostics` persists review flags. A GET that
-  writes is a trap for link previews; it is not a POST because of that, and the
-  write is idempotent, but it is a write.
 - The audit ledger is append-only to the database and not tamper-evident against
   an operator holding the file. Real tamper-evidence needs an external anchor.
 - No encryption at rest, as a consequence of the self-hosted, inspectable design.
+- **Judging abuse is structurally mitigated, not detected.** Uniqueness
+  constraints stop one account voting twice; nothing stops one person holding many
+  accounts, because there is no identity verification, CAPTCHA or proof of
+  personhood. Ballot stuffing is bounded by the rate limit and the judging window
+  but not detected — a judge can complete the whole queue in the first hour of a
+  48-hour window and nothing flags it. Declared conflicts are self-reported.
+  Sybil voting, ballot stuffing, submission scraping, judge collusion and deadline
+  gaming each have a section in `docs/THREAT-MODEL.md` stating what defends them
+  and what does not.
+- The participation record is a **content hash, not a signature.** It proves the
+  record is unaltered since issuance; it does not prove which deployment issued
+  it, because there is no private key in the system. The verification message says
+  so rather than implying otherwise.
 
 **API**
 - Most handlers resolve the parent record before checking permission, so an
   anonymous caller with a nonexistent id gets 404 rather than 401 (82 of 111
   protected operations).
-- The published OpenAPI document has six known defects — success statuses, query
-  parameters, the `requestId` header, an unreachable 429, synthetic 401/403
-  responses, and no documented upload body. All listed in `docs/API.md`.
+- The published document lists `401` and `403` as the truthful possibilities for
+  every protected operation where the handler may return `404` first. That is the
+  useful description for a client but not the exact one; deriving the real
+  per-handler precedence would mean each route declaring its own failure set.
 - Nine operations enforce permission with a bespoke check rather than the
   matrix. Behaviour is correct; coverage is not uniform.
 
@@ -223,18 +255,21 @@ Stated rather than hidden. None is a surprise; all are recorded in the docs.
 
 ## Release checklist
 
-- [x] `npm run verify` green: typecheck, 382 unit/integration, build, 45 browser, 35 acceptance
-- [x] OpenAPI document current and checked in CI
+- [x] `npm run verify` green: typecheck, 441 unit/integration, build, 50 browser, 35 acceptance
+- [x] OpenAPI document current, and checked against a live server on every test run
 - [x] Result pipeline deterministic and reproducible, verified from stored reviews
 - [x] Published results immutable, corrections supersede rather than rewrite
 - [x] Role boundaries enforced server-side, not only hidden in the UI
 - [x] Audit ledger append-only, enforced by triggers
-- [x] No dead advertised features: every webhook topic fires, every route serves, every panel is real
+- [x] No dead advertised features: every webhook topic fires, every route serves, every declared export and import kind works, every panel is real
+- [x] Voting cannot leak into the result it informs; participants may correct a vote
+- [x] Reads do not write
 - [x] Responsive and accessible at 390 / 768 / 1280 / 1440
-- [x] Migration from an older release tested with data intact
+- [x] Migration from an older release tested with data intact (v11 → v15)
 - [x] Backup and restore tested end to end, including result reproduction
+- [x] `docker compose up` needs no `.env`; Apache-2.0 `LICENSE` present and asserted by test
 - [x] Documentation complete: architecture, judging, data model, API, threat model, development, operations
-- [ ] **Docker image built and run** — NOT EXECUTED, Docker unavailable
+- [ ] Docker image and compose stack actually built and run — **NOT EXECUTED, Docker unavailable in this environment**
 - [ ] **Restore from a production backup** — tested procedurally, not against production data
 - [x] No secrets, credentials or `.env` committed
 - [x] All commits authored and committed by the repository owner alone

@@ -296,6 +296,136 @@ per-IP limit. Only turn it on behind a proxy you control.
 
 ---
 
+## The five ways the judging is attacked
+
+The abuse cases specific to this application, rather than to web software in
+general. Each states the attack, what actually defends it, and what does not.
+
+### Sybil voting
+
+**The attack.** One person registers many accounts to multiply their vote, or
+registers many teams to multiply their projects, so a single preference is
+represented as a crowd. This is the attack the whole assignment and pairwise
+scoring design exists to resist.
+
+**What defends it.** Votes are unique per `(event, user, submission)` and
+per `(event, user, judge_assignment)` in the database, not in application code,
+so a second vote is a constraint violation rather than an update.
+`judge_conflicts` refuses an assignment where the judge is on the submitting
+team. Voter eligibility comes from an accepted registration or a team
+membership, not from anyone being able to vote. Pairwise comparisons are scoped
+to a judge's committed assignments, so voting power does not grow with the number
+of accounts beyond the number of legitimate assignments.
+
+**What does not.** There is no identity verification of any kind - no email
+confirmation requirement on the registration path that gates voting, no
+CAPTCHA, no proof-of-personhood. The uniqueness constraints stop one person voting
+twice *per account*; nothing stops one person holding many accounts. An organizer
+who cares must verify registrations out of band, and the system gives them
+nothing to help with that. Nor is there a Sybil-resistant aggregate, so a
+coordinated ring voting coherently is statistically indistinguishable from a
+broad preference. This is a known, stated limitation, not an oversight.
+
+### Ballot stuffing
+
+**The attack.** Filling the queue as fast as the rate limit allows, or in one
+scripted burst, to produce a scoring pattern that reflects how fast the judge was
+clicking rather than what they thought. It distorts normalization because
+duration correlates with confidence, and it is a way to game a system whose
+stated defence is deliberative pairwise comparison.
+
+**What defends it.** The vote budget (60/hour) bounds throughput. A submission
+is only scoreable while the event's judging window is open, so the stuffing
+cannot be spread across an arbitrary period. Per-project autosave means a judge
+cannot lose work by being interrupted, which removes the excuse for rushing.
+Timestamps and durations are recorded per score, so a burst is visible in the
+data rather than only in the outcome.
+
+**What does not.** The 60/hour budget is a ceiling, not a floor, and nothing
+detects *unusually fast* judging. A judge can complete every assignment in the
+first hour of a 48-hour window and nothing objects, flags it, or requires an
+explanation. The minimum-time signal that would catch this is recorded but never
+evaluated, so this is a detection opportunity left unbuilt rather than a check
+that fails. `TRUST_PROXY` misconfiguration would also weaken the per-IP half of
+the defence by allowing forged client addresses.
+
+### Submission scraping
+
+**The attack.** A participant or a competitor enumerating
+`GET /api/events/{eventId}/submissions` or the gallery to read other teams'
+project descriptions, technology choices and submission links before judging
+ends - intelligence that is only supposed to be visible at a fixed time.
+
+**What defends it.** The distinction between the public gallery and the
+organizer's submission list is enforced by permission, not by obscurity:
+`GET /api/events/{eventId}/submissions` requires `submission:read` in an
+organized event, while the gallery is public and shows only projects that are
+public. Drafts are never in either. An anonymous caller to the submission list
+gets 401, and a signed-in participant gets 403 rather than a partial list.
+
+**What does not.** The gallery is public *during* judging, by design, and it
+exposes project names, descriptions, technologies and repository links. There is
+no per-request limit tied to identity on the public read surface beyond the global
+600/60s budget, so a determined caller can enumerate a large event's gallery
+faster than a human would read it. There is no honeypot, no anomaly detection on
+read volume, and no visibility metric - nothing in the audit ledger distinguishes
+one visitor reading the gallery from two hundred, because reads are not audited.
+
+### Judge collusion
+
+**The attack.** Two or more judges coordinating their scores to lift a project
+they both like, or to punish one they both dislike, in a system that presents
+normalization as the defence against bias. It is the attack that most directly
+undermines the product's central claim, and it is also the hardest to detect,
+because coordinated scores look like ordinary ones.
+
+**What defends it.** Assignments are committed with a strategy and a coverage
+report, so the organizer can see whether a judge's set was shaped to avoid
+particular projects - and the assignment strategy options include forms that
+spread judges across teams. Declared conflicts are recorded in `judge_conflicts`,
+block the assignment, and are themselves visible in the conflict register.
+Anonymous pairwise comparison hides each project's identity during the
+comparison, which removes the "who am I scoring, and in whose favour" social
+pressure that collusion exploits. Normalization is per-judge, so one judge's
+inflated scale does not dominate the aggregate.
+
+**What does not.** This is the weakest area in the system and the honest answer
+is that the defences are structural, not behavioural. Declared conflicts are
+self-reported: nothing checks that a judge declared a relationship with a team
+they are on the same panel as. There is no detection of correlated scoring - no
+flag for two judges whose rankings are suspiciously similar across independent
+assignments, and adding one is a research question rather than a rule. The
+conflict register is organizer-only, so it is invisible to other judges and to
+participants, which means a conflict that was missed is missed silently. And
+scores are private to their judge, so a judge cannot even see whether anyone else
+is scoring a project the way they are.
+
+### Deadline gaming
+
+**The attack.** Waiting until the last possible moment to submit, so the judging
+window closes before anyone can notice a problem, or claiming a deadline was
+missed when the state machine and the recorded timestamps disagree.
+
+**What defends it.** Windows are dates on the event, enforced server-side on
+every state-dependent operation rather than by hiding a button. The state machine
+permits a transition only from a legal state, so a judge cannot score a closed
+event even by calling the API directly. Submission and score timestamps are
+recorded in the audit ledger, which is append-only - enforced by the database
+refusing deletes, and tested - so the record of when something happened cannot be
+rewritten after the fact. Voting is hidden while results cannot be published over
+an open window, which closes the reverse trick of judging early to a finish.
+
+**What does not.** The system has no scheduled transition. Nothing moves an event
+to `CLOSED` when its judging window passes; a human has to make the call, and
+until they do the event stays open and keeps accepting scores. That is a
+deliberate operational choice - an automatic close can be worse than a late one,
+because a clock error would close judging on time - but it means the enforcement
+of the deadline depends on an operator acting, and nothing in the product tells
+them it is overdue. There is likewise no timezone handling beyond storing and
+comparing ISO-8601, and no per-event grace period.
+
+---
+
 ## Data at rest
 
 - Passwords: scrypt digests only.

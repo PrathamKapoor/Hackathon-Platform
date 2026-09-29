@@ -495,6 +495,28 @@ export class CertificateService {
       { j: row.judge_id },
     );
 
+    /*
+     * Redact the scores before showing the detail to an anonymous caller.
+     *
+     * The detail is returned for a reason: it is the per-project breakdown the
+     * hash covers, so a verifier can see *what* the record attests to and not
+     * just that some numbers are self-consistent. But it also carries each
+     * project's raw score, and this endpoint is unauthenticated and the
+     * reference is a short guessable-ish string. Publishing one judge's
+     * individual scores through a "verify my participation" link would undo the
+     * score-isolation rule the rest of the system enforces - it would let anyone
+     * holding a reference read a judge's private scoring, and correlate it with
+     * the leaderboard.
+     *
+     * The hash still covers the scores, which is what preserves the integrity
+     * property: the score was part of the record when it was issued, so if
+     * somebody edits a score in the database the recomputation above stops
+     * matching and the record reports TAMPERED. Redacting the *output* costs
+     * the verifier nothing they can act on, because they cannot recompute a
+     * value they have not been given - the server does that part.
+     */
+    const publicDetail = redactScores(detail);
+
     return {
       valid,
       status: valid ? ('VALID' as const) : ('TAMPERED' as const),
@@ -508,9 +530,10 @@ export class CertificateService {
       issuedAt: row.issued_at,
       integrityHash: row.integrity_hash,
       recomputedHash: recomputed,
-      detail,
+      detail: publicDetail,
+      redactedFields: ['assignedProjects[].score'],
       message: valid
-        ? 'This record was issued by Verdict and its contents match its recorded hash. It attests that the named person sat on this panel and completed the stated number of reviews; it is not a cryptographic signature, so it proves the record is unaltered rather than which deployment issued it.'
+        ? 'This record was issued by Verdict and its contents match its recorded hash. It attests that the named person sat on this panel and completed the stated number of reviews; it is not a cryptographic signature, so it proves the record is unaltered rather than which deployment issued it. Individual scores are withheld: the hash covers them, but publishing them here would expose a judge\'s private scoring.'
         : 'The stored contents do not match the recorded hash. Do not rely on this record.',
     };
   }
@@ -609,6 +632,27 @@ export class CertificateService {
 }
 
 /* --------------------------------------------------------- rendering */
+
+/**
+ * Strip the per-project scores out of a participation record's detail.
+ *
+ * A defensive copy, so the caller's parsed object is not mutated. The
+ * structure is rebuilt rather than the score key deleted in place, because the
+ * verification endpoint must not be able to leak a score through a nested shape
+ * someone adds to the record later.
+ */
+function redactScores(detail: unknown): unknown {
+  if (Array.isArray(detail)) return detail.map((item) => redactScores(item));
+  if (detail === null || typeof detail !== 'object') return detail;
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(detail as Record<string, unknown>)) {
+    // Any key that reads as a score, in any casing, and anything nested inside
+    // an array of per-project rows.
+    if (/^(raw_?)?score$/i.test(key)) continue;
+    out[key] = redactScores(value);
+  }
+  return out;
+}
 
 function escapeXml(value: string): string {
   return value.replace(/[&<>"']/g, (c) => {

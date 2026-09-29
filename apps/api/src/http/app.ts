@@ -26,7 +26,7 @@ import { Database } from '../db/database.ts';
 import { createLogger } from '../lib/logger.ts';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { RateLimiter, buildContext, csrfGuard, installErrorHandler, installNotFoundHandler, newRequestId, notFoundBody, RouteRegistry } from './context.ts';
+import { RateLimiter, buildContext, csrfGuard, installErrorHandler, installNotFoundHandler, requestIdFrom, notFoundBody, RouteRegistry } from './context.ts';
 import { buildOpenApiDocument } from './openapi.ts';
 import {
   registerAuthRoutes,
@@ -95,7 +95,20 @@ export async function buildApp(options: BuildOptions = {}): Promise<BuiltApp> {
      * emits FSTDEP022 on every boot and will be removed in Fastify 6.
      */
     routerOptions: { maxParamLength: 256 },
-    genReqId: () => newRequestId(),
+    /*
+     * A caller may supply `x-request-id`, validated by `requestIdFrom`.
+     *
+     * `requestIdHeader` is deliberately *not* set. It looks like the obvious
+     * way to do this and it is a trap: when it is set, Fastify copies the header
+     * value into `request.id` verbatim without calling `genReqId` and without
+     * validating it. An attacker - or a confused caller - could then put a
+     * megabyte of junk, a newline, or someone else's correlation id into every
+     * audit row, the logs and the response header. Going through `genReqId`
+     * alone means the id is length- and charset-checked once, and
+     * `request.ctx.requestId` - which is what the audit ledger writes - is the
+     * same validated value that gets echoed.
+     */
+    genReqId: (req) => requestIdFrom(req as unknown as { headers: Record<string, unknown> }),
     ajv: { customOptions: { coerceTypes: true, removeAdditional: false, allErrors: true } },
   });
 
@@ -207,6 +220,25 @@ export async function buildApp(options: BuildOptions = {}): Promise<BuiltApp> {
   app.addHook('onRequest', (request, _reply, done) => {
     request.ctx = buildContext(request, { config, db, auth: services.auth, audit: services.audit, logger, services: services as never });
     done();
+  });
+
+  /*
+   * Echo the request id.
+   *
+   * Every operation in the published document advertises an optional
+   * `x-request-id` header, "echoed in the response and recorded in the audit
+   * ledger". Two separate bugs made that false. Fastify's `requestIdHeader` only
+   * says where to *read* an id from; nothing wrote it back, so no response ever
+   * carried one. And Fastify's own `request.id` is a per-process counter, which
+   * is a different value from the id the ledger stores, so echoing it would have
+   * produced a header that did not correlate with anything. The context id is
+   * the one that is written to the audit rows, so that is the one echoed, with
+   * Fastify's counter as the fallback for a request that never got a context.
+   */
+  app.addHook('onSend', (request, reply, payload, done) => {
+    const id = request.ctx?.requestId ?? (typeof request.id === 'string' ? request.id : '');
+    if (id !== '') reply.header('x-request-id', id);
+    done(null, payload);
   });
 
   /* --------------------------------------------------------- rate limiting */

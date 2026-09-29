@@ -112,11 +112,27 @@ Cross-origin browser requests are additionally rejected on `Origin` or `Referer`
 
 ### Request ids
 
-The server generates `req_<uuid>` per request and records it in the audit ledger
-and in logs. **It is not echoed in a response header** and an inbound
-`x-request-id` is ignored - the spec's description of that parameter is stale.
-To correlate, read it from an error body or from
-`GET /api/events/{eventId}/audit`.
+The server generates `req_<uuid>` per request, records it in the audit ledger and
+in logs, and **echoes it as `x-request-id` on every response**, including error
+responses.
+
+A caller may supply its own. An inbound `x-request-id` is used when it is 8-128
+characters of `[A-Za-z0-9._:-]`; anything else is ignored and a fresh id is
+generated. A malformed id is ignored rather than refused on purpose - a debugging
+aid must not be able to cause a denial of service - and a response always carries
+an id either way.
+
+The value in the header is the same one written to the audit rows, so a header
+from a response and a `requestId` in `GET /api/events/{eventId}/audit` can be
+matched directly.
+
+One implementation note, because the obvious approach is wrong: this is done
+with Fastify's `genReqId` and **not** with `requestIdHeader`. `requestIdHeader`
+copies the header value into `request.id` verbatim without validating it, which
+would let a caller put arbitrary content - another user's correlation id, a
+newline, megabytes of junk - into the audit ledger, the logs and the response
+header. Going through `genReqId` alone means the id is checked once, in one
+place.
 
 ### Idempotency
 
@@ -206,7 +222,7 @@ bio, organization, links, skills, avatar colour.
 
 | Operation | Auth | Notes |
 | --- | --- | --- |
-| `GET /api/events` | none | The only operation with documented query parameters: `state`, `search`, `page`, `perPage`. |
+| `GET /api/events` | none | Query: `state`, `search`, `page`, `perPage`. |
 | `POST /api/events` | session | 201. Creator becomes organizer; a default form is created. |
 | `GET /api/events/{eventId}` | none | With live window status. |
 | `PATCH /api/events/{eventId}` | organizer | |
@@ -386,38 +402,50 @@ digest. `GET /api/admin/overview`, `POST /api/admin/users/{userId}/roles`,
 
 ---
 
-## Known limitations of the published spec
+## The published document is checked against the running server
 
-Recorded rather than fixed, because each needs a structural change to the route
-registry rather than a one-line default. None of them affects behaviour; all of
-them affect a client that trusts the document.
+`npm run openapi` writes `openapi.json`; `npm run check:openapi` fails if the
+committed document is stale, so adding or removing a route requires both. The
+stale check is necessary but not sufficient, because a generator can be wrong in
+the same way on every run. `apps/api/test/openapi-truth.test.ts` therefore
+compares the document the server actually serves against behaviour measured from
+a live, seeded instance, and `npm test` runs it.
 
-1. **Success statuses are wrong for 135 of 140 operations.** Any route that
-   declares no response schema is documented as `204 No Content`. The real
-   distribution is 120 × `200`, 21 × `201`, 6 × `204`. The 21 that really return
-   201: `POST /api/auth/register`, `/api/events`,
-   `/api/events/{eventId}/{tracks,prizes,registration,registration/form/fields,teams,submissions,conflicts,judges/invite,pairwise,calibration,results/{runId}/snapshot,votes,certificates,webhooks}`,
-   `/api/teams/{teamId}/invitations`, `/api/submissions/{submissionId}/comments`,
-   `/api/submissions/{submissionId}/uploads`. The 6 that really return 204:
-   `/api/auth/logout`, `DELETE /api/conflicts/{conflictId}`,
-   `/api/uploads/{uploadId}`, `/api/webhooks/{webhookId}`,
-   `/api/teams/{teamId}/members/{userId}`,
-   `/api/events/{eventId}/registration/form/fields/{fieldId}`.
-   `DELETE /api/auth/sessions/{sessionId}` really returns 200.
-2. **Query parameters are almost entirely undocumented.** Path parameters are
-   emitted individually, but a route's query schema is emitted as one
-   object-valued parameter named `query`, which no tooling reads as individual
-   parameters. Only `GET /api/events` has any.
-3. **The `requestId` header parameter is documented on all 140 operations and is
-   not implemented** - see the conventions above.
-4. **`429` is advertised on every operation**, including `/api/health`, which is
-   rate-limit exempt and can never return one.
-5. **Synthetic `401`/`403` responses are advertised for every protected
-   operation**, but most handlers return `404` first, and three judge endpoints
-   used to return `500` when anonymous (now 401).
-6. **The upload endpoint has no documented request body**, because the
-   `multipart/form-data` branch is never reached when no route registers a body
-   schema.
+It asserts, among other things:
 
-Regenerate with `npm run openapi`; `npm run check:openapi` fails if the
-committed document is stale. Adding or removing a route requires both.
+- every operation declares exactly one success status, and it is the one the
+  handler actually returns - `POST /api/events/{eventId}/teams` is driven for
+  real and must come back 201, not the 204 the old default claimed;
+- the only `POST` documented as 204 is logout, pinned as an explicit list so a
+  new one has to be justified;
+- query schemas appear as individual named parameters, not one object-valued
+  `query`;
+- a rate-limit-exempt route does not advertise 429, while the other 100+ that
+  legitimately can still do;
+- the upload endpoint documents its `multipart/form-data` body;
+- every operation in the document is a route Fastify really serves, probed with a
+  synthetic id, distinguishing a missing route from a handler's own domain 404;
+- a supplied `x-request-id` is echoed, a malformed one is ignored rather than
+  refused, and the id in the header is the same one written to the audit ledger;
+- public participation verification publishes no numeric score.
+
+### What is still approximated
+
+These affect a client that trusts the document, and none affects server
+behaviour:
+
+1. **Synthetic `401`/`403` responses are advertised for every protected
+   operation.** Most handlers resolve the resource before checking permission
+   and so return `404` to a caller with no access. The document lists `401` and
+   `403` as the truthful possibilities, which is the useful description for a
+   client but not the exact one. Deriving the real per-handler precedence would
+   mean every route declaring its own failure set.
+2. **Response bodies are described by schema, not by example per operation.** The
+   error and pagination shapes are shared and exact; the success payloads are
+   covered by the shared `Error` and `Pagination` components plus the test suite
+   rather than a per-operation schema.
+3. **The document is generated from the same Zod schemas the server validates
+   with.** That is a strong guarantee for bodies and queries - the schema in the
+   document is the schema in use - but it means the *shape of a route* is a
+   human declaration (`success`, `rateLimited`, `multipart`, `auth`) and can still
+   be wrong. The truth test is what catches that.

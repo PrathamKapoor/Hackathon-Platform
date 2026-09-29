@@ -216,6 +216,78 @@ test('a judge can read their own participation record, and anyone can verify one
   assert.equal(missing.body.status, 'NOT_FOUND');
 });
 
+test('public participation verification does not publish the judge\'s scores', async (t) => {
+  /*
+   * The verification endpoint is unauthenticated, and the detail it returns is
+   * the per-project breakdown - which carried each project's raw score. That is
+   * a private judgement, and a `JPR-` reference is a short, partially guessable
+   * string, so the endpoint as written let anyone holding a reference read a
+   * judge's individual scoring. The hash still covers the score, so tamper
+   * detection is unaffected.
+   */
+  const harness = await openHarness(t);
+  const eventId = seededEventId(harness);
+  const organizer = harness.client();
+  await organizer.login('organizer@dogfood.dev', DEMO_PASSWORD);
+  const issued = await organizer.post<{ issued: number }>(`/api/events/${eventId}/participation-records`);
+  assert.equal(issued.status, 200);
+  assert.ok(issued.body.issued > 0, 'no records were issued, so this test would be vacuous');
+
+  const judge = harness.client();
+  await judge.login('amara@dogfood.dev', DEMO_PASSWORD);
+  const mine = await judge.get<{ data: { reference: string }[] }>('/api/participation-records/mine');
+  const reference = mine.body.data[0]?.reference;
+  assert.ok(reference !== undefined, 'the demo judge has no record to check');
+
+  // Confirm the seed really does produce scores, so the assertions below are
+  // testing a populated record rather than an empty one.
+  const stored = harness.db.get<{ detail: string }>(
+    'SELECT detail FROM judge_participation_records WHERE reference = :r',
+    { r: reference },
+  );
+  const storedProjects = (JSON.parse(stored?.detail ?? '{}') as { assignedProjects?: { score?: unknown }[] }).assignedProjects ?? [];
+  assert.ok(
+    storedProjects.some((project) => typeof project.score === 'number'),
+    'the seeded record has no scores, so the redaction assertions would be vacuous',
+  );
+
+  const anonymous = harness.client();
+  const verified = await anonymous.get<{ detail: { assignedProjects?: { score?: unknown }[] }; redactedFields: string[] }>(
+    `/api/participation-records/${reference}`,
+  );
+  assert.equal(verified.status, 200);
+
+  // No score may appear anywhere in the response body, at any depth.
+  assert.doesNotMatch(
+    verified.raw,
+    /"score"\s*:\s*-?\d/,
+    'the public verification response still contains a numeric score',
+  );
+
+  const returned = verified.body.detail.assignedProjects ?? [];
+  assert.ok(returned.length > 0, 'the redacted detail dropped the project rows entirely, which is not what redaction means');
+  for (const project of returned) {
+    assert.equal(project.score, undefined, 'a project row still carries its score');
+  }
+
+  // The useful part survives: what was assigned, and whether it was completed.
+  assert.ok(
+    returned.every((project) => typeof project === 'object' && project !== null),
+    'the redacted rows are not objects',
+  );
+  assert.ok(Array.isArray(verified.body.redactedFields), 'the response does not say what it withheld');
+  assert.ok(
+    verified.body.redactedFields.some((field) => /score/i.test(field)),
+    'the response does not disclose that scores were withheld',
+  );
+
+  // And redaction did not break verification: the hash still recomputes, because
+  // the server hashes the stored detail rather than the redacted copy.
+  assert.equal(verified.body.detail !== undefined, true, 'detail is missing from the response');
+  const valid = await anonymous.get<{ status: string }>(`/api/participation-records/${reference}`);
+  assert.equal(valid.body.status, 'VALID', 'redacting the output stopped the record verifying');
+});
+
 test('the judge participation record is reachable from the API surface', async (t) => {
   const harness = await openHarness(t);
   const spec = await harness.client().get<{ paths: Record<string, unknown> }>('/api/openapi.json');

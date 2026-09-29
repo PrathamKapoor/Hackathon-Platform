@@ -38,6 +38,27 @@ const Paging = z.object({
   perPage: z.coerce.number().int().min(1).max(200).default(25),
 });
 
+/*
+ * Query schemas, named and shared between the handler that enforces them and
+ * the registry that documents them. See the note in `routes.ts` for why these
+ * are constants rather than inline expressions.
+ */
+const AnomalyQuery = z
+  .object({
+    status: z.enum(['OPEN', 'ACKNOWLEDGED', 'INVESTIGATING', 'DISMISSED', 'RESOLVED']).optional(),
+    severity: z.enum(['LOW', 'MEDIUM', 'HIGH']).optional(),
+  })
+  .merge(Paging);
+const NormalizationMethodQuery = z.object({
+  method: z
+    .enum(NORMALIZATION_METHODS as unknown as [string, ...string[]])
+    .default('Z_SCORE')
+    .describe('The alternative method to compare the raw scores against.'),
+});
+const CertificateListQuery = z
+  .object({ kind: z.enum(['PARTICIPANT', 'FINALIST', 'WINNER', 'JUDGE']).optional() })
+  .merge(Paging);
+
 function ctx(request: { ctx: import('../lib/auth.ts').RequestContext }) {
   return actorContext({
     actor: request.ctx.actor,
@@ -91,13 +112,7 @@ export function registerInsightRoutes(app: FastifyInstance, services: Services, 
 
   app.get('/api/events/:eventId/anomalies', async (request) => {
     const params = z.object({ eventId: Id }).parse(request.params);
-    const query = z
-      .object({
-        status: z.enum(['OPEN', 'ACKNOWLEDGED', 'INVESTIGATING', 'DISMISSED', 'RESOLVED']).optional(),
-        severity: z.enum(['LOW', 'MEDIUM', 'HIGH']).optional(),
-      })
-      .merge(Paging)
-      .parse(request.query);
+    const query = AnomalyQuery.parse(request.query);
     const eventId = eventIdOf(services, params.eventId);
     requirePermission(services, request.ctx, 'anomaly', 'read', { inOrganizedEvent: canManageEvent(request.ctx.actor, eventId) }, { eventId, resourceType: 'anomalyFlag' });
     const paging = normalisePaging(query);
@@ -118,7 +133,7 @@ export function registerInsightRoutes(app: FastifyInstance, services: Services, 
     };
   });
   registry.register({
-    method: 'GET', path: '/api/events/{eventId}/anomalies', tags: ['diagnostics'], auth: 'organizer',
+      method: 'GET', path: '/api/events/{eventId}/anomalies', tags: ['diagnostics'], auth: 'organizer', querystring: AnomalyQuery,
     summary: 'The review-flag register, filterable by status and severity.', permission: { resource: 'anomaly', action: 'read' },
   });
 
@@ -146,13 +161,13 @@ export function registerInsightRoutes(app: FastifyInstance, services: Services, 
 
   app.get('/api/events/:eventId/normalization/comparison', async (request) => {
     const params = z.object({ eventId: Id }).parse(request.params);
-    const query = z.object({ method: z.enum(NORMALIZATION_METHODS as unknown as [string, ...string[]]).default('Z_SCORE') }).parse(request.query);
+    const query = NormalizationMethodQuery.parse(request.query);
     const eventId = eventIdOf(services, params.eventId);
     requirePermission(services, request.ctx, 'normalization', 'read', { inOrganizedEvent: canManageEvent(request.ctx.actor, eventId) }, { eventId, resourceType: 'normalization' });
     return services.results.normalizationComparison(eventId, query.method as never, ctx(request));
   });
   registry.register({
-    method: 'GET', path: '/api/events/{eventId}/normalization/comparison', tags: ['normalization'], auth: 'organizer',
+      method: 'GET', path: '/api/events/{eventId}/normalization/comparison', tags: ['normalization'], auth: 'organizer', querystring: NormalizationMethodQuery,
     summary: 'Raw scoring against one alternative normalization method, project by project.',
     permission: { resource: 'normalization', action: 'read' },
     description:
@@ -216,10 +231,7 @@ export function registerInsightRoutes(app: FastifyInstance, services: Services, 
 
   app.get('/api/events/:eventId/certificates', async (request) => {
     const params = z.object({ eventId: Id }).parse(request.params);
-    const query = z
-      .object({ kind: z.enum(['PARTICIPANT', 'FINALIST', 'WINNER', 'JUDGE']).optional() })
-      .merge(Paging)
-      .parse(request.query);
+    const query = CertificateListQuery.parse(request.query);
     const eventId = eventIdOf(services, params.eventId);
     requirePermission(services, request.ctx, 'certificate', 'read', { inOrganizedEvent: canManageEvent(request.ctx.actor, eventId) }, { eventId, resourceType: 'certificate' });
     const paging = normalisePaging(query);
@@ -247,7 +259,7 @@ export function registerInsightRoutes(app: FastifyInstance, services: Services, 
     };
   });
   registry.register({
-    method: 'GET', path: '/api/events/{eventId}/certificates', tags: ['certificates'], auth: 'organizer',
+      method: 'GET', path: '/api/events/{eventId}/certificates', tags: ['certificates'], auth: 'organizer', querystring: CertificateListQuery,
     summary: 'Certificates issued for this event, with their verification references.',
     permission: { resource: 'certificate', action: 'read' },
   });
