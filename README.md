@@ -269,6 +269,8 @@ npm run build          # the web client
 npm run openapi        # export openapi.json from the route registry
 npm run check:openapi  # fail if openapi.json is stale
 npm run acceptance     # 35-check release harness
+npm run reproduce     # compute a result twice and verify it, over HTTP
+npm run airgap        # the 20-check battery for a --network none container
 npm run verify         # typecheck, test, build, e2e, acceptance
 ```
 

@@ -402,7 +402,7 @@ test('the image builds, the stack starts with no .env, and the data survives a r
 
   // Restart, then check the write survived. A compose file that mounts a volume
   // to the wrong path passes every check above and loses everything here.
-  const restart = await compose(['-f', 'docker-compose.yml', '-f', 'docker-compose.test.yml', 'restart']);
+  const restart = await compose(['restart']);
   assert.equal(restart.code, 0, `docker compose restart failed:\n${restart.out.slice(-2000)}`);
 
   for (let attempt = 0; attempt < 60; attempt += 1) {
@@ -422,4 +422,70 @@ test('the image builds, the stack starts with no .env, and the data survives a r
     (trackList.data ?? []).some((track) => track.name === trackName),
     'the track created before the restart did not survive it, so the volume is not mounted where the app writes',
   );
+
+  /*
+   * Runtime hardening, checked against the running container rather than read
+   * off the Dockerfile.
+   *
+   * `/app` was `chown -R node:node`, so the application directory was writable
+   * by the process running the application. That is the one thing an immutable
+   * deployment should not allow: anything that achieves code execution in the
+   * container can then rewrite the code it is executing, and the next restart is
+   * the attacker's version. The release report had claimed `/app` was read-only
+   * - which was a claim about a Dockerfile, not a measurement of an image.
+   */
+  /*
+   * Runtime hardening, measured on the running container.
+   *
+   * `scripts/container-runtime-probe.sh` is copied in and executed by name
+   * rather than passed as a `sh -c '...'`. The harness spawns docker through
+   * `cmd.exe` on Windows, which strips the quotes around a `sh -c` argument, so
+   * the inner command is lost and `sh -c cat` runs `cat` with no arguments and
+   * reads stdin until the test times out. That is not a hypothetical: it is how
+   * the first version of this probe failed, after 30 minutes.
+   */
+  const dockerExec = async (args: string[]): Promise<{ code: number; out: string }> =>
+    await new Promise((resolve) => {
+      const child = spawn('docker', args, { cwd: ROOT });
+      let out = '';
+      // Bounded, so a hang is a fast failure with a reason rather than a
+      // thirty-minute stall.
+      const timer = setTimeout(() => {
+        child.kill();
+        resolve({ code: -2, out: `${out}\n(timed out: docker ${args.join(' ')})` });
+      }, 60_000);
+      child.stdout.on('data', (chunk: Buffer) => { out += String(chunk); });
+      child.stderr.on('data', (chunk: Buffer) => { out += String(chunk); });
+      child.on('error', (error) => { clearTimeout(timer); resolve({ code: -1, out: `${out}\n${String(error)}` }); });
+      child.on('close', (code) => { clearTimeout(timer); resolve({ code: code ?? -1, out }); });
+    });
+
+  const copied = await dockerExec(['cp', join(ROOT, 'scripts', 'container-runtime-probe.sh'), 'verdict:/tmp/probe.sh']);
+  assert.equal(copied.code, 0, `could not copy the runtime probe into the container: ${copied.out.slice(-300)}`);
+
+  const probed = await dockerExec(['exec', 'verdict', 'sh', '/tmp/probe.sh']);
+  await dockerExec(['exec', 'verdict', 'rm', '-f', '/tmp/probe.sh']);
+  assert.equal(probed.code, 0, `the runtime probe did not run: ${probed.out.slice(-400)}`);
+
+  const facts = new Map<string, string>();
+  for (const line of probed.out.split('\n')) {
+    const eq = line.trim().indexOf('=');
+    if (eq > 0) facts.set(line.trim().slice(0, eq), line.trim().slice(eq + 1));
+  }
+  assert.ok(facts.size >= 5, `the runtime probe produced no usable facts: ${probed.out.slice(-400)}`);
+
+  // `id -un` is the bare name on GNU and `1000(node)` on busybox, so assert the
+  // property rather than the spelling.
+  const uid = facts.get('uid') ?? '';
+  assert.match(uid, /node/, `the container is not running as the node user, it is running as "${uid}"`);
+  assert.doesNotMatch(uid, /root/, 'the container is running as root');
+  assert.equal(facts.get('pid1'), 'tini', 'tini is not PID 1, so SIGTERM would be swallowed rather than forwarded');
+  assert.equal(
+    facts.get('app_writable'),
+    'no',
+    '/app is writable by the application process, so anything executing in the container can rewrite the code it runs',
+  );
+  assert.equal(facts.get('data_writable'), 'yes', '/data is not writable, so the app cannot persist anything');
+  assert.equal(facts.get('test_files'), 'absent', 'the test suite is present in the production image');
+  assert.equal(facts.get('devdeps'), 'pruned', 'a development dependency is present in the production image');
 });

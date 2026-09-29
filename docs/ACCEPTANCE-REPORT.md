@@ -164,6 +164,60 @@ job is to record what was true when it was taken. A foreign key would mean
 deleting a track could not remove the reference to it from an already-published
 result, so a historical record would break in the present tense. The reasoning is
 recorded in the migration's own comments, next to the code.
+---
+
+## Result reproduction, measured
+
+`npm run reproduce`, `npm run tamper`, `npm run diffCheck` and
+`npm run rawEvidence` drive the reproducibility claim rather than asserting it.
+All four ran against the container on schema 16.
+
+| Claim | How it was checked | What happened |
+| --- | --- | --- |
+| Two computations from identical inputs agree | computed twice over HTTP | **identical integrity hash** `24913c4a6124f709`, and the same per-entry ranking, not merely the same hash |
+| A published result is verifiable without an account | `GET /api/results/verify/{eventId}::{snapshotId}` anonymously | `MATCH`, 0 differences |
+| Verification actually detects tampering | one stored `raw_score` altered **directly in SQLite**, then the same anonymous endpoint | `MATCH` -> `MISMATCH` -> `MATCH` on restore |
+| Normalization did not destroy its inputs | per-judge means read back from the database | 5 judges span **6.639 points** and all 5 remain distinct; 34 of 34 reviews still carry `raw_score` alongside the normalized total; 136 criterion rows keep `value` next to `normalized` |
+| One changed input changes every conclusion | organizer `reproduce` after the tamper | 6 differences: the input hash, two rank swaps, both prizes changing hands, and the aggregate score moving 88.15 -> 92.13 |
+
+That last row is the one that makes the rest mean anything. A single altered
+score propagates all the way through to which project is awarded the Grand Prize,
+and the diff names every field that moved. A MATCH from a verifier that has
+never been seen to say MISMATCH is not evidence.
+
+The public route returns only the verdict and deliberately withholds the diff —
+a published result's field-level breakdown is not owed to the public. The
+organizer route is the one that carries it, and that is the route checked above.
+
+---
+
+## A second defect, found by measuring rather than reading
+
+**`/app` was writable by the process running the application.** The Dockerfile
+had `chown -R node:node /data /app`, so the application directory was owned by
+the unprivileged runtime user. Anything that achieved code execution in the
+container could then rewrite the code it was executing, and the next restart
+would be the attacker's version.
+
+The release report had claimed `/app` was read-only. That claim was made about a
+Dockerfile rather than measured on an image, and it was wrong. `/app` is now left
+root-owned and `chmod a-w`; `/data` is still handed to the node user, because the
+app has to write there.
+
+`scripts/container-runtime-probe.sh` now measures this against the running
+container, and `deployment.test.ts` asserts every runtime property from it:
+non-root, `tini` as PID 1, `/app` not writable, `/data` writable, no test files
+in the image, no development dependencies. A Dockerfile that says the wrong thing
+is a claim; a probe that says the wrong thing is a failure.
+
+### A note on how the probe is invoked
+
+`docker exec` is used with a copied-in script rather than a `sh -c '...'` string.
+The harness spawns docker through `cmd.exe` on Windows, which strips the quotes
+around a `sh -c` argument, so the inner command is lost and `sh -c cat` runs `cat`
+with no arguments and reads stdin. The first version of this probe failed after
+30 minutes for exactly that reason, which is why the mechanism is worth a
+sentence here rather than only in a code comment.
 ### A defect the air-gapped run found
 
 31. **`GET /api/results/verify/{reference}` returned 422 for every real
@@ -281,7 +335,10 @@ This is a property of the harness, not a product defect, and it is why
 
 | Requirement | Status | Evidence |
 | --- | --- | --- |
-| Deterministic, reproducible ranking | Met | Same inputs, same `integrityHash`. `reproducibility.test.ts`. |
+| Deterministic, reproducible ranking | **Verified by execution** | Computed twice over HTTP against the container: identical hash `24913c4a6124f709` and identical per-entry ranking, not merely the same hash. `npm run reproduce`, plus `reproducibility.test.ts`. |
+| Tamper detection actually fires | **Verified by execution** | One stored `raw_score` altered directly in SQLite: `MATCH` → `MISMATCH` → `MATCH` on restore. A verifier never seen to say MISMATCH proves nothing. `npm run tamper`. |
+| The diff names what changed | **Verified by execution** | That single alteration propagated to 6 fields — the input hash, two rank swaps, both prizes changing hands, and an aggregate moving 88.15 → 92.13. `npm run diffCheck`. |
+| Normalization preserves its inputs | **Verified by execution** | 5 judge means span 6.639 points and all 5 remain distinct after normalization; 34/34 reviews still carry `raw_score` beside the normalized total. `npm run rawEvidence`. |
 | Publish refuses a result that does not reproduce | Met | Recomputed before publish; 412 with a field-level diff. |
 | Published results are immutable | Met | Database triggers on snapshots and their entries. |
 | A correction supersedes rather than rewrites | Met | `supersedes_id` chain; the old snapshot stays verifiable. |
@@ -545,6 +602,8 @@ Stated rather than hidden. None is a surprise; all are recorded in the docs.
 - [x] Documentation complete: architecture, judging, data model, API, threat model, development, operations
 - [x] **Docker image built, container run, and the deployed artefact driven** — image builds clean, starts with no `.env`, applies migrations, seeds, survives restart and `down`/`up`, wipes on `down -v`, drains gracefully as non-root; 50 browser tests and a 40-check organizer probe pass against it
 - [x] Every create route returns its documented status; a duplicate track name is no longer a 500
+- [x] Result reproducibility, tamper detection and raw-evidence preservation all **measured against the running container**, not inferred from the unit suite
+- [x] `/app` is read-only in the running image, measured by a probe rather than read off the Dockerfile
 - [ ] **Restore from a production backup** — tested procedurally, not against production data
 - [x] **Air-gapped container run** — the production image started with `--network none`, and 20 of 20 checks passed over loopback: migrations, seed, health, frontend and assets, sign-in for both roles, scoring and submission, normalization, result computation, determinism, public verification, audit, OpenAPI. Isolation proven by a negative control first. **Verified in an air-gapped container execution**, not inferred.
 - [ ] **Browser suite inside the air-gapped container** — impossible by construction: no network namespace means no TCP route from the host. Covered against the normally-networked container instead, and the split is recorded.

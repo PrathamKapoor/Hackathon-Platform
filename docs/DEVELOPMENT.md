@@ -107,6 +107,34 @@ cannot do — a compose file that mounts its volume to the wrong path passes eve
 other check and loses the data. Where Docker is absent the test is **skipped
 with a reason**, never silently passed.
 
+### Reproducing a result by hand
+
+Four scripts drive the reproducibility claim rather than asserting it, and all
+four are meant to be run against a running container:
+
+`ash
+npm run reproduce    # compute twice, publish, verify anonymously
+npm run tamper       # alter a stored score in SQLite; expect MATCH -> MISMATCH -> MATCH
+npm run diffCheck    # the organizer reproduce, showing which fields moved
+npm run rawEvidence  # per-judge raw means, proving normalization did not overwrite them
+`
+
+
+pm run tamper and 
+pm run rawEvidence read the database directly, so they
+have to run inside the container:
+
+`ash
+docker cp scripts/tamper-detection.mjs verdict:/data/tamper.mjs
+docker exec verdict node /data/tamper.mjs
+`
+
+
+pm run tamper deliberately edits a score outside the application. That is
+the only way to simulate an operator with file access, and it is the only thing
+that makes the MATCH in the other scripts mean anything - a verifier that has
+never been seen to report MISMATCH is not evidence of anything.
+
 ### The air-gapped battery
 
 `npm run airgap` is a separate script because it has to run *inside* the

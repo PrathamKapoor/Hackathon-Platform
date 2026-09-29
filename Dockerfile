@@ -64,7 +64,18 @@ COPY --from=build /app/apps/web/dist ./apps/web/dist
 # The database and uploaded files live on a volume, never in the image layer.
 # Everything the platform knows has to survive `docker compose down -v` being
 # typed with a stray flag.
-RUN mkdir -p /data/uploads && chown -R node:node /data /app
+#
+# `/data` is handed to the node user because the app writes there. `/app` is
+# deliberately NOT: it was `chown -R node:node /data /app`, which made the
+# application directory writable by the process running the application. That
+# is the one thing an immutable deployment should not allow - anything that
+# achieves code execution in the container can then rewrite the code it is
+# running, and the next restart is the attacker's version. The release report
+# claimed `/app` was read-only; checking rather than assuming found otherwise.
+#
+# Read and execute are enough, and both come from the default 0755 on a
+# root-owned directory, so the fix is simply to stop giving it away.
+RUN mkdir -p /data/uploads && chown -R node:node /data && chmod -R a-w /app
 VOLUME ["/data"]
 
 USER node

@@ -30,7 +30,11 @@
     "test:browser": "npm run test:e2e",
     "acceptance": "node scripts/acceptance.ts",
     "verify": "npm run typecheck && npm run test && npm run build && npm run test:e2e && npm run acceptance",
-    "airgap": "node scripts/airgap-battery.mjs"
+    "airgap": "node scripts/airgap-battery.mjs",
+    "reproduce": "node scripts/reproduce-result.mjs",
+    "tamper": "node scripts/tamper-detection.mjs",
+    "rawEvidence": "node scripts/raw-evidence-check.mjs",
+    "diffCheck": "node scripts/reproduce-diff-check.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",
