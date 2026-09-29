@@ -261,10 +261,10 @@ an operator with the file.
 
 ```bash
 npm run typecheck      # both the node and the browser project
-npm test               # 382 unit and integration tests
+npm test               # 444 unit and integration tests
 npm run test:core      # the judging engine alone
 npm run test:api       # API, security, migrations, static serving
-npm run test:e2e       # builds, then 45 browser tests
+npm run test:e2e       # builds, then 50 browser tests
 npm run build          # the web client
 npm run openapi        # export openapi.json from the route registry
 npm run check:openapi  # fail if openapi.json is stale
@@ -272,13 +272,23 @@ npm run acceptance     # 35-check release harness
 npm run verify         # typecheck, test, build, e2e, acceptance
 ```
 
+The same browser suite also runs against the container, so the deployed image is
+tested rather than only the source tree:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.test.yml up -d
+npm run build
+E2E_BASE_URL=http://localhost:8080 node --test --test-concurrency=1 "apps/api/test/e2e/*.test.ts"
+docker compose -f docker-compose.yml -f docker-compose.test.yml down -v
+```
+
 The API documentation is generated from the route registry, and served live at
 `/api/docs` and `/api/openapi.json`. It is checked in CI, so it cannot fall
-silently behind the implementation — but it is not a perfect description of it,
-and the gaps are listed rather than glossed: success statuses, query parameters
-and the `requestId` header in the published document are all known to be wrong or
-incomplete. See the closing section of `docs/API.md` before treating it as
-authoritative.
+silently behind the implementation, and it is also **compared against a live
+server on every test run** — success statuses, query parameters, the request-id
+header, the upload body and the rate-limit-exempt route are all asserted against
+measured behaviour rather than against the generator's own output. What is still
+approximated is listed in the closing section of `docs/API.md`.
 
 ### Documentation
 
@@ -287,7 +297,7 @@ authoritative.
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Request lifecycle, storage model, failure modes considered. |
 | [`docs/JUDGING.md`](docs/JUDGING.md) | The mathematics: normalization, aggregation, pairwise, diagnostics. |
 | [`docs/DATA-MODEL.md`](docs/DATA-MODEL.md) | Every table, what the schema guarantees, and where it can drift. |
-| [`docs/API.md`](docs/API.md) | Conventions, error codes, all 140 operations, known spec defects. |
+| [`docs/API.md`](docs/API.md) | Conventions, error codes, all 144 operations, and what the published document still approximates. |
 | [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) | Assets, trust boundaries, mitigations, and what is left over. |
 | [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) | Layout, commands, testing, conventions. |
 | [`docs/OPERATIONS.md`](docs/OPERATIONS.md) | Deploy, back up, restore, upgrade, recover, capacity. |
@@ -300,6 +310,12 @@ randomness — no database, no server, no sleeping. The API is tested through th
 real Fastify instance with `app.inject` against a real SQLite file on disk, so
 migrations, `STRICT` tables, foreign keys, `CHECK` constraints and triggers are
 all genuinely exercised. Nothing important is mocked.
+
+The browser suite runs in two modes, and the second one is not optional
+decoration: against a server the test starts, and against the container built by
+the Dockerfile. That is what found the duplicate-track-name 500 — a real
+`UNIQUE` violation escaping as an unhandled database error on an ordinary act of
+event configuration, which no amount of reading the code had surfaced.
 
 ---
 

@@ -98,7 +98,19 @@ describe('browser: newly routed surfaces', () => {
   });
 
   test('a certificate reference resolves and reports a real verification status', async () => {
-    const reference = harness.db.value<string>('SELECT reference FROM certificates LIMIT 1');
+    // The reference comes from the database when this harness owns it, and from
+    // the API when it does not. Either way it is a reference the server issued.
+    let reference: string | null = null;
+    if (harness.db !== null) {
+      reference = harness.db.value<string>('SELECT reference FROM certificates LIMIT 1');
+    } else {
+      const asOrganizer = await harness.signedIn(ACCOUNTS.organizer);
+      const listed = await asOrganizer.request.get(`${harness.base}/api/events/${harness.eventId}/certificates?perPage=1`);
+      assert.ok(listed.ok(), `listing certificates returned ${String(listed.status())}`);
+      const body = (await listed.json()) as { data?: { reference: string }[] };
+      reference = body.data?.[0]?.reference ?? null;
+      await asOrganizer.context().close();
+    }
     assert.ok(reference !== null, 'seeding issues at least one certificate');
 
     const context = await harness.freshContext();
@@ -131,10 +143,33 @@ describe('browser: newly routed surfaces', () => {
   test('an invitation link reaches the invitation page, not the 404', async () => {
     // The preview is public, so a signed-out visitor is the honest case: the
     // route must resolve and explain that signing in is required.
-    const code = harness.db.value<string>("SELECT code FROM team_invitations WHERE status = 'PENDING' LIMIT 1");
+    let code: string | null = null;
+    if (harness.db !== null) {
+      code = harness.db.value<string>("SELECT code FROM team_invitations WHERE status = 'PENDING' LIMIT 1");
+    } else {
+      // Issue one, so the route is exercised with a code that really exists
+      // rather than skipped for want of a database handle.
+      const asOrganizer = await harness.signedIn(ACCOUNTS.organizer);
+      const teams = await asOrganizer.request.get(`${harness.base}/api/events/${harness.eventId}/teams?perPage=1`);
+      if (teams.ok()) {
+        const body = (await teams.json()) as { data?: { id: string; memberCount?: number }[] };
+        const team = body.data?.[0];
+        if (team !== undefined && (team.memberCount ?? 0) === 0) {
+          const invited = await asOrganizer.request.post(`${harness.base}/api/teams/${team.id}/invitations`, {
+            data: {},
+          });
+          if (invited.ok()) {
+            const issued = (await invited.json()) as { invitation?: { code?: string } };
+            code = issued.invitation?.code ?? null;
+          }
+        }
+      }
+      await asOrganizer.context().close();
+    }
     if (code === null) {
-      // The seeded dataset does not guarantee a pending invitation; the
-      // route-agreement test covers the API-issued URL shape in that case.
+      // The seeded dataset does not guarantee a pending invitation, and when
+      // running against an external server there may be no empty team to invite
+      // to. The route-agreement test covers the API-issued URL shape.
       return;
     }
     const context = await harness.freshContext();

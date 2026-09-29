@@ -471,6 +471,35 @@ export class EventService {
 
   /* ------------------------------------------------------------- tracks */
 
+  /**
+   * A track slug that is free within this event.
+   *
+   * `event_tracks` has a UNIQUE constraint on `(event_id, slug)`, and nothing
+   * derived a free slug the way teams and submissions do. So an organizer
+   * creating a second track called "Applied AI" - or two tracks whose names
+   * slugify the same way, like "AI/ML" and "AI ML" - got a bare SQLite
+   * `UNIQUE constraint failed` escaping as a 500 with a stack trace in the log
+   * and "An unexpected error occurred" to the caller.
+   *
+   * That is the wrong answer twice over. A duplicate name is a normal thing to
+   * try while configuring an event, and the one piece of information the caller
+   * needs is "that name is taken". Teams already got this right; tracks did not.
+   */
+  private uniqueTrackSlug(eventId: string, base: string, excludeId?: string): string {
+    let candidate = base;
+    let suffix = 1;
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      const clash = this.db.get<{ id: string }>('SELECT id FROM event_tracks WHERE event_id = :e AND slug = :s', {
+        e: eventId,
+        s: candidate,
+      });
+      if (clash === null || clash.id === excludeId) return candidate;
+      suffix += 1;
+      candidate = `${base}-${String(suffix)}`;
+    }
+    throw errors.conflict('Could not derive a unique track slug; please choose a different name.');
+  }
+
   addTrack(
     eventId: string,
     input: { slug?: string; name: string; description?: string; color?: string; maxProjects?: number | null },
@@ -480,7 +509,7 @@ export class EventService {
     const event = this.require(eventId);
     this.assertOrganizer(actor, event, ctx);
     const name = validatePlainText(input.name, { field: 'track name', min: 2, max: 100 });
-    const slug = validateSlug(input.slug ?? slugify(name), 'track slug');
+    const slug = this.uniqueTrackSlug(eventId, validateSlug(input.slug ?? slugify(name), 'track slug'));
     const id = newId('track');
     const order = (this.db.value<number>('SELECT COALESCE(MAX(display_order), -1) + 1 AS o FROM event_tracks WHERE event_id = :e', { e: eventId }) ?? 0) as number;
 

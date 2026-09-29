@@ -362,15 +362,20 @@ describe('browser: judge', { skip }, () => {
     assert.match((await page.textContent('[role="status"]')) ?? '', /recorded/i, 'the comparison was not confirmed');
     await h.shot(page, 'judge-pairwise');
 
-    // The comparison is persisted, not just held in component state.
-    const count = h.db.value<number>(
-      `SELECT COUNT(*) AS c FROM pairwise_comparisons pc
-         JOIN judges j ON j.id = pc.judge_id
-         JOIN users u ON u.id = j.user_id
-        WHERE u.email_normalized = :e AND pc.outcome = 'TIE'`,
-      { e: ACCOUNTS.unfinishedJudge },
-    );
-    assert.ok((count ?? 0) > 0, 'the recorded comparison did not reach the database');
+    // The comparison is persisted, not just held in component state. Only
+    // checkable when this harness owns the database; against an external
+    // server it is behind someone else's volume, and asserting on it would mean
+    // reaching past the boundary the test is supposed to be testing.
+    if (h.db !== null) {
+      const count = h.db.value<number>(
+        `SELECT COUNT(*) AS c FROM pairwise_comparisons pc
+           JOIN judges j ON j.id = pc.judge_id
+           JOIN users u ON u.id = j.user_id
+          WHERE u.email_normalized = :e AND pc.outcome = 'TIE'`,
+        { e: ACCOUNTS.unfinishedJudge },
+      );
+      assert.ok((count ?? 0) > 0, 'the recorded comparison did not reach the database');
+    }
   });
 
   test('a judge cannot reach the organizer console', async () => {

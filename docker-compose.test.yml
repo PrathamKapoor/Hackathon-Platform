@@ -1,0 +1,33 @@
+# Compose override for running the browser E2E suite against the container.
+#
+# `npm run test:e2e` normally starts its own server, which means it tests the
+# source tree. This file exists so the same 50 tests can be pointed at the
+# *deployed* artefact instead - the image built by the Dockerfile, running as a
+# non-root user on a real volume, serving the published bundle:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.test.yml up -d
+#   npm run build
+#   E2E_BASE_URL=http://localhost:8080 node --test "apps/api/test/e2e/*.test.ts"
+#
+# The rate limits are raised, and that is the only thing here that is not
+# production-shaped. The default auth budget is 10 attempts per 5 minutes, which
+# is the right number for a real deployment and the wrong number for a suite
+# that signs in roughly sixty times in a minute. The limit itself is covered by
+# its own tests in the normal run; this file is about reaching the UI, not about
+# re-testing the limiter against a raised ceiling.
+services:
+  verdict:
+    environment:
+      AUTH_RATE_LIMIT_MAX: "1000"
+      RATE_LIMIT_MAX: "100000"
+      # A fresh volume, so the suite gets the seeded dataset rather than
+      # whatever a previous manual session left behind. Teardown data and a
+      # browser test that needs an empty team do not mix.
+    volumes:
+      - type: volume
+        source: verdict-e2e-data
+        target: /data
+        volume: {}
+
+volumes:
+  verdict-e2e-data:

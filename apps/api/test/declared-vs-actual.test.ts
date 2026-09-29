@@ -295,3 +295,99 @@ test('the judge participation record is reachable from the API surface', async (
     assert.ok(spec.body.paths[path] !== undefined, `${path} is served but not documented`);
   }
 });
+
+test('a duplicate track name is refused, not a 500', async (t) => {
+  /*
+   * Found by running the container, not by reading the code: creating the same
+   * track twice returned `500 INTERNAL_ERROR` with a raw SQLite `UNIQUE
+   * constraint failed: event_tracks.event_id, event_tracks.slug` in the log.
+   *
+   * Nothing derived a free slug the way teams and submissions already do, so the
+   * UNIQUE constraint on `(event_id, slug)` escaped as an unhandled database
+   * error. An organizer adding a second track called "Applied AI" - or two
+   * names that slugify alike, like "AI/ML" and "AI ML" - got "an unexpected error
+   * occurred" instead of the one fact they needed.
+   */
+  const harness = await openHarness(t);
+  const eventId = seededEventId(harness);
+  const organizer = harness.client();
+  await organizer.login('organizer@dogfood.dev', DEMO_PASSWORD);
+
+  const first = await organizer.post<{ id: string; slug: string }>(`/api/events/${eventId}/tracks`, {
+    name: 'Applied AI',
+    description: 'the first one',
+  });
+  assert.equal(first.status, 201, `the first create failed: ${first.raw.slice(0, 200)}`);
+
+  /*
+   * A duplicate name is resolved by deriving a free slug, the way teams and
+   * submissions already do, rather than by refusing. That is the better answer:
+   * the UNIQUE constraint is on the *slug*, and an organizer who has two tracks
+   * both called "Applied AI" in different events is not doing anything wrong.
+   * The important part of the fix is only that it is a 201 and not a 500.
+   */
+  const second = await organizer.post<{ id: string; slug: string }>(`/api/events/${eventId}/tracks`, {
+    name: 'Applied AI',
+    description: 'the same name again',
+  });
+  assert.equal(second.status, 201, `a duplicate track name returned ${String(second.status)}: ${second.raw.slice(0, 200)}`);
+  assert.notEqual(second.body.slug, first.body.slug, 'the duplicate was given the same slug, so the next insert would still fail');
+  assert.notEqual(second.body.id, first.body.id, 'the duplicate overwrote the original');
+
+  // Both survive, because neither was silently collapsed into the other. The
+  // seed already has a track called "Applied AI", so this is a count of at
+  // least two rather than exactly two.
+  const list = await organizer.get<{ data: { id: string; name: string; slug: string }[] }>(`/api/events/${eventId}/tracks`);
+  const slugs = new Set((list.body.data ?? []).map((track) => track.slug));
+  assert.equal(slugs.size, (list.body.data ?? []).length, 'two tracks share a slug, which is the constraint that used to 500');
+  assert.ok(
+    (list.body.data ?? []).some((track) => track.id === first.body.id) &&
+      (list.body.data ?? []).some((track) => track.id === second.body.id),
+    'one of the two created tracks is missing, so the duplicate collapsed the original',
+  );
+
+  // And a name that slugifies the same way as an existing one is also handled,
+  // because that is the case a name-equality check would miss.
+  const deSlugified = await organizer.post<{ slug: string }>(`/api/events/${eventId}/tracks`, {
+    name: 'AI/ML',
+    description: 'slugs to the same thing as AI ML',
+  });
+  assert.equal(deSlugified.status, 201, `a distinct name was refused: ${deSlugified.raw.slice(0, 200)}`);
+  assert.notEqual(deSlugified.body.slug, first.body.slug, 'two distinct names were given the same slug');
+});
+
+test('every create route returns its documented status on the happy path', async (t) => {
+  /*
+   * A single duplicate-name 500 was a symptom, not the disease: nothing in the
+   * suite checked that a create actually returns 201 rather than falling over
+   * on a constraint the seed data happened not to violate. This drives the
+   * creates the seed data does not already occupy, with names the seed cannot
+   * have, and requires 201 from each.
+   */
+  const harness = await openHarness(t);
+  const eventId = seededEventId(harness);
+  const organizer = harness.client();
+  await organizer.login('organizer@dogfood.dev', DEMO_PASSWORD);
+
+  const panel = await organizer.get<{ data: { id: string; state: string }[] }>(`/api/events/${eventId}/judges`);
+  const aJudge = panel.body.data.find((judge) => judge.state === 'ACTIVE') ?? panel.body.data[0];
+  assert.ok(aJudge !== undefined, 'the seeded event has nobody on the panel to file a conflict against');
+
+  const creates: { label: string; path: string; payload: Record<string, unknown> }[] = [
+    { label: 'track', path: `/api/events/${eventId}/tracks`, payload: { name: 'Verification Track', description: 'unique to this test' } },
+    { label: 'prize', path: `/api/events/${eventId}/prizes`, payload: { name: 'Verification Prize', description: 'unique to this test' } },
+    { label: 'team', path: `/api/events/${eventId}/teams`, payload: { name: 'Verification Team', description: 'unique to this test' } },
+    { label: 'conflict', path: `/api/events/${eventId}/conflicts`, payload: { judgeId: aJudge.id, kind: 'CUSTOM', subjectKind: 'ORGANIZATION', subjectId: 'verification-org', note: 'unique to this test' } },
+    { label: 'webhook', path: `/api/events/${eventId}/webhooks`, payload: { url: 'https://example.com/verification', subscriptions: ['results.published'], secret: 'verification-secret-0123456789' } },
+  ];
+
+  for (const create of creates) {
+    const response = await organizer.post(create.path, create.payload);
+    assert.equal(
+      response.status,
+      201,
+      `creating a ${create.label} returned ${String(response.status)}: ${response.raw.slice(0, 200)}`,
+    );
+    assert.match(response.raw, /"id"\s*:\s*"[a-z]+_/, `creating a ${create.label} returned no id`);
+  }
+});

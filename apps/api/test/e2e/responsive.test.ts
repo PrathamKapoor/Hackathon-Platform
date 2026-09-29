@@ -270,20 +270,44 @@ test('no page scrolls sideways at any viewport', { skip, timeout: 900_000 }, asy
 test('signed-in surfaces hold up at every viewport', { skip, timeout: 900_000 }, async () => {
   const h = await shared();
 
-  // The review page needs a real assignment id from the demo data.
-  const assignment = h.db.get<{ id: string }>(
-    `SELECT a.id FROM judge_assignments a
-      WHERE a.event_id = :e AND a.status <> 'REASSIGNED'
-      ORDER BY a.id LIMIT 1`,
-    { e: h.eventId },
-  );
-  assert.ok(assignment !== null, 'the demo has an assignment to review');
+  // The review page needs a real assignment id from the demo data. Read from
+  // the database when this harness owns it; otherwise from the API, which is
+  // the only route to the same fact that does not cross a volume boundary.
+  let assignmentId: string | null = null;
+  if (h.db !== null) {
+    const assignment = h.db.get<{ id: string }>(
+      `SELECT a.id FROM judge_assignments a
+        WHERE a.event_id = :e AND a.status <> 'REASSIGNED'
+        ORDER BY a.id LIMIT 1`,
+      { e: h.eventId },
+    );
+    assignmentId = assignment?.id ?? null;
+  } else {
+    /*
+     * Ask as the organizer.
+     *
+     * Two things make this less obvious than it looks. The assignments list is
+     * `assignment:read` inside an organized event, so an anonymous caller gets
+     * 401 - a silent null here reads as "the demo has no assignment", pointing
+     * at the wrong thing. And the judge's pairwise queue is no substitute: it
+     * returns *submission* ids, while the review route is addressed by
+     * *assignment* id.
+     */
+    const asOrganizer = await h.signedIn(ACCOUNTS.organizer);
+    const queued = await asOrganizer.request.get(`${h.base}/api/events/${h.eventId}/assignments?perPage=1`);
+    if (queued.ok()) {
+      const body = (await queued.json()) as { data?: { id: string }[] };
+      assignmentId = body.data?.[0]?.id ?? null;
+    }
+    await asOrganizer.context().close();
+  }
+  assert.ok(assignmentId !== null, 'the demo has an assignment to review');
 
   const surfaces: { name: string; path: string; email: string }[] = [
     { name: 'workspace', path: '/workspace', email: ACCOUNTS.participant },
     { name: 'organizer-console', path: '/organize', email: ACCOUNTS.organizer },
     { name: 'judge-queue', path: '/judge', email: ACCOUNTS.generousJudge },
-    { name: 'judge-review', path: `/judge/${assignment.id}`, email: ACCOUNTS.generousJudge },
+    { name: 'judge-review', path: `/judge/${assignmentId}`, email: ACCOUNTS.generousJudge },
   ];
 
   for (const [name, viewport] of Object.entries(VIEWPORTS)) {

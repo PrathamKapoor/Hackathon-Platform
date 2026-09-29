@@ -2,30 +2,37 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { spawn } from 'node:child_process';
 import { parse as parseYaml } from 'yaml';
 
 /**
- * The deployment contract, checked without Docker.
+ * The deployment contract.
  *
  * The challenge says `docker compose up` must start a seeded, working platform
- * from a fresh clone, with no `.env` and nothing to generate first. Docker is
- * not available in the environment this was written in, so none of that can be
- * *executed* here - and the release report says so rather than claiming
- * otherwise. What can be checked is the part that makes the execution possible:
- * the compose file's own shape.
+ * from a fresh clone, with no `.env` and nothing to generate first.
  *
+ * Most of this file checks the compose file's *shape*, which is what can be
+ * asserted on any machine: that the defaults are present, that the secret
+ * satisfies the application's own production rule, that there is a healthcheck,
+ * a named volume, and a shutdown grace longer than the app's force-exit timer.
  * These are the assertions that would otherwise be a paragraph in a README that
  * quietly stopped being true:
  *
- *   - `SESSION_SECRET` used to be `${SESSION_SECRET:?…}`, so compose aborted with
+ *   - `SESSION_SECRET` used to be `${SESSION_SECRET:?.}`, so compose aborted with
  *     an error telling you to copy `.env.example` and generate one. That is the
  *     exact thing the requirement forbids, and it was invisible because nothing
  *     read the file.
  *   - The default secret now has to satisfy the application's own production
  *     rule - at least 32 characters - or `docker compose up` would get a step
  *     further and then die on boot.
- *   - The rest of the contract: a seed, a healthcheck, a named volume, and a
- *     shutdown grace period longer than the application's own force-exit timer.
+ *
+ * The last test in the file *executes* the contract, when Docker is present. It
+ * is skipped rather than failed when Docker is absent, so this suite stays
+ * runnable everywhere - but where Docker exists, the image is built, the stack
+ * started with no `.env`, readiness awaited, the real endpoints probed, and
+ * persistence across a restart checked. That is the check that would have caught
+ * a compose file which parses but does not work, and it did: it is how the
+ * duplicate-track-name 500 was found.
  */
 
 const ROOT = process.cwd();
@@ -231,4 +238,167 @@ test('the declared license is consistent everywhere it appears', () => {
   // set of terms and believes they are covered by another.
   const claims = [readme, license].filter((text) => /MIT|GPL|BSD|AGPL/.test(text) && !/Apache-2\.0/.test(text));
   assert.deepEqual(claims, [], 'a document claims a license other than Apache-2.0');
+});
+
+
+/* ------------------------------------------------------------------ *
+ * Executing the contract, when Docker is here.
+ * ------------------------------------------------------------------ */
+
+/**
+ * Is Docker usable from here?
+ *
+ * A binary on `PATH` is not the same as a running daemon, and a compose file
+ * that parses is not the same as a stack that starts. Both are checked, and a
+ * failure at either is a skip with a reason rather than a silent pass.
+ */
+async function dockerAvailable(): Promise<{ ok: boolean; reason: string }> {
+  const probe = async (args: string[]): Promise<{ code: number; out: string }> => {
+    return await new Promise((resolve) => {
+      const child = spawn('docker', args, { cwd: ROOT, shell: true });
+      let out = '';
+      child.stdout.on('data', (chunk: Buffer) => { out += String(chunk); });
+      child.stderr.on('data', (chunk: Buffer) => { out += String(chunk); });
+      child.on('error', () => { resolve({ code: -1, out }); });
+      child.on('close', (code) => { resolve({ code: code ?? -1, out }); });
+    });
+  };
+
+  const version = await probe(['version', '--format', '{{.Server.Version}}']);
+  if (version.code !== 0) {
+    return {
+      ok: false,
+      reason: version.out.includes('not recognized')
+        ? 'docker is not on PATH'
+        : `the Docker daemon is not reachable (${version.out.trim().split('\n')[0] ?? 'no output'})`,
+    };
+  }
+  return { ok: true, reason: `server ${version.out.trim()}` };
+}
+
+const DOCKER_TEST = { timeout: 1_800_000, skip: false } as const;
+
+test('the image builds, the stack starts with no .env, and the data survives a restart', DOCKER_TEST, async (t) => {
+  const docker = await dockerAvailable();
+  if (!docker.ok) {
+    t.skip(`Docker is not usable here: ${docker.reason}. The static assertions above still apply.`);
+    return;
+  }
+
+  const compose = async (args: string[]): Promise<{ code: number; out: string }> => {
+    return await new Promise((resolve) => {
+      const child = spawn('docker', ['compose', ...args], { cwd: ROOT, shell: true });
+      let out = '';
+      child.stdout.on('data', (chunk: Buffer) => { out += String(chunk); });
+      child.stderr.on('data', (chunk: Buffer) => { out += String(chunk); });
+      child.on('error', () => { resolve({ code: -1, out }); });
+      child.on('close', (code) => { resolve({ code: code ?? -1, out }); });
+    });
+  };
+
+  const noDotEnv = !existsSync(join(ROOT, '.env'));
+  t.diagnostic(
+    noDotEnv
+      ? 'no .env present, which is the case under test'
+      : 'a .env file exists in this working tree; the compose defaults are still what a fresh clone would get',
+  );
+
+  // From a clean slate, so the first-boot path is genuinely first boot.
+  await compose(['-f', 'docker-compose.yml', '-f', 'docker-compose.test.yml', 'down', '-v']);
+  const build = await compose(['-f', 'docker-compose.yml', '-f', 'docker-compose.test.yml', 'build']);
+  assert.equal(build.code, 0, `docker compose build failed:\n${build.out.slice(-3000)}`);
+
+  const up = await compose(['-f', 'docker-compose.yml', '-f', 'docker-compose.test.yml', 'up', '-d']);
+  assert.equal(up.code, 0, `docker compose up failed:\n${up.out.slice(-3000)}`);
+
+  t.after(async () => {
+    await compose(['-f', 'docker-compose.yml', '-f', 'docker-compose.test.yml', 'down', '-v']);
+  });
+
+  // Readiness, by polling the endpoint the healthcheck actually probes.
+  const base = 'http://localhost:8080';
+  let ready = false;
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    try {
+      const response = await fetch(`${base}/api/ready`);
+      if (response.ok) {
+        const body = (await response.json()) as { status?: string; schemaVersion?: number };
+        assert.equal(body.status, 'ready', `/api/ready said ${String(body.status)}`);
+        assert.equal(body.schemaVersion, 15, 'the container is not on the current schema version');
+        ready = true;
+        break;
+      }
+    } catch {
+      // Not listening yet.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+  assert.ok(ready, `the container never became ready within 120s (${docker.reason})`);
+
+  // A seeded event, since a working platform is a seeded one.
+  const events = (await (await fetch(`${base}/api/events`)).json()) as { data?: { id: string }[] };
+  assert.ok((events.data?.length ?? 0) > 0, 'the container started with no seeded event');
+
+  // The published document is served and is the one in the repository.
+  const served = await (await fetch(`${base}/api/openapi.json`)).text();
+  const inRepo = readFileSync(join(ROOT, 'openapi.json'), 'utf8');
+  const normalise = (json: string): string => JSON.stringify(JSON.parse(json) as unknown);
+  assert.equal(normalise(served), normalise(inRepo), 'the container serves a different openapi.json than the repository holds');
+
+  // Static serving and the API-only 404, which is a common regression when a
+  // SPA fallback is put in front of an API.
+  const shell = await fetch(`${base}/projects/some-project-slug`);
+  assert.equal(shell.status, 200, 'a deep link did not return the SPA shell');
+  assert.match(shell.headers.get('content-type') ?? '', /text\/html/, 'a deep link did not return HTML');
+
+  const missing = await fetch(`${base}/api/definitely-not-here`);
+  assert.equal(missing.status, 404, 'an unknown API path did not 404');
+  assert.match(missing.headers.get('content-type') ?? '', /application\/json/, 'an unknown API path did not return JSON');
+
+  // Security headers on a real response from the real image.
+  const root = await fetch(`${base}/`);
+  const csp = root.headers.get('content-security-policy') ?? '';
+  assert.match(csp, /default-src 'self'/, `the container is not setting a CSP: ${csp || 'none'}`);
+
+  // Now the thing a static review cannot do: does a write actually persist?
+  const login = await fetch(`${base}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ email: 'organizer@dogfood.dev', password: 'verdict-demo-2026' }),
+  });
+  assert.equal(login.status, 200, 'the seeded organizer could not sign in against the container');
+  const cookie = (login.headers.getSetCookie() ?? []).map((line) => line.split(';')[0] ?? '').join('; ');
+  const session = (await login.json()) as { csrfToken?: string };
+  assert.ok(session.csrfToken !== undefined, 'no CSRF token came back with the session');
+
+  const trackName = `Deployment Test ${String(Date.now())}`;
+  const created = await fetch(`${base}/api/events/${String(events.data?.[0]?.id)}/tracks`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', cookie, 'x-verdict-csrf': String(session.csrfToken) },
+    body: JSON.stringify({ name: trackName, description: 'written by the deployment test' }),
+  });
+  assert.equal(created.status, 201, `creating a track in the container returned ${String(created.status)}: ${await created.text()}`);
+
+  // Restart, then check the write survived. A compose file that mounts a volume
+  // to the wrong path passes every check above and loses everything here.
+  const restart = await compose(['-f', 'docker-compose.yml', '-f', 'docker-compose.test.yml', 'restart']);
+  assert.equal(restart.code, 0, `docker compose restart failed:\n${restart.out.slice(-2000)}`);
+
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    try {
+      if ((await fetch(`${base}/api/ready`)).ok) break;
+    } catch {
+      // Not listening yet.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+
+  const afterRestart = await fetch(`${base}/api/events/${String(events.data?.[0]?.id)}/tracks`, {
+    headers: { cookie, 'x-verdict-csrf': String(session.csrfToken) },
+  });
+  const trackList = (await afterRestart.json()) as { data?: { name: string }[] };
+  assert.ok(
+    (trackList.data ?? []).some((track) => track.name === trackName),
+    'the track created before the restart did not survive it, so the volume is not mounted where the app writes',
+  );
 });

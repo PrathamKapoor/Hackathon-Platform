@@ -64,6 +64,49 @@ inputs with no ambient state.
 | `npm run seed` | Seeds the demo dataset. |
 | `npm run openapi` / `check:openapi` | Regenerate the spec, or fail if it is stale. |
 
+### Running the browser suite against the container
+
+`npm run test:e2e` starts its own server, so it tests the source tree. To run
+the same tests against the deployed artefact — the image the Dockerfile builds,
+running as a non-root user on a volume, serving the published bundle:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.test.yml up -d
+npm run build
+E2E_BASE_URL=http://localhost:8080 node --test --test-concurrency=1 "apps/api/test/e2e/*.test.ts"
+docker compose -f docker-compose.yml -f docker-compose.test.yml down -v
+```
+
+`docker-compose.test.yml` exists for this and does two things: it raises the
+rate limits, and it uses a separate volume. Both matter.
+
+The limits, because the default auth budget is 10 attempts per 5 minutes — right
+for a deployment, wrong for a suite that signs in about sixty times. The volume,
+because **the browser suite is not idempotent against a server it does not
+own**: it submits the two assignments the seed deliberately leaves unfinished,
+so a second run against the same container has nothing left to score and fails
+for a reason that has nothing to do with the code. Run it against a fresh
+volume.
+
+With `E2E_BASE_URL` set, the harness starts nothing, seeds nothing, and `db` is
+`null`. The four tests that would otherwise read the database check for that and
+either use the API instead or skip the database-specific assertion. That is why
+`db` is typed `Database | null` rather than left as-is: reaching into a volume the
+test does not own would defeat the point of testing the container.
+
+This is how the duplicate-track 500 was found — it needs the real event data, a
+real constraint, and a real request.
+
+`npm test` also contains a deployment test that does the same thing on its own:
+if Docker is usable, it builds the image, starts the stack with no `.env`, waits
+for readiness on the endpoint the healthcheck actually probes, checks the served
+`openapi.json` against the repository's, checks that a deep link returns HTML
+while an unknown API path returns JSON, creates a track, restarts the container,
+and asserts the track is still there. That last step is the one a static review
+cannot do — a compose file that mounts its volume to the wrong path passes every
+other check and loses the data. Where Docker is absent the test is **skipped
+with a reason**, never silently passed.
+
 Run `npm run verify` before pushing anything that changes behaviour. It is the
 same command CI should run.
 
@@ -77,7 +120,7 @@ unrelated work - it is a separate decision with its own rollout.
 
 ### Unit and integration - `npm test`
 
-441 tests over 70 suites. Every API test boots the **real** Fastify instance
+444 tests over 70 suites. Every API test boots the **real** Fastify instance
 through `app.inject`, against a **real SQLite file on disk** - not a mock and not
 `:memory:`. Migrations, `STRICT` tables, foreign keys, `CHECK` constraints and
 triggers are therefore exercised for real, which is most of why the schema's

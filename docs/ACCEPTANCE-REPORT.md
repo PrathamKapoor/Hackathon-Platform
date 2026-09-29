@@ -14,14 +14,13 @@ organizer console, a judge surface that works at the size of a real panel, a
 security posture that holds up under adversarial testing, and the documentation
 an operator needs to deploy and recover it.
 
-**Not executed: Docker.** Neither `docker` nor `docker compose` is installed in
-the environment this was verified in. The image and compose file were reviewed
-statically and their settings corrected, but no image was built and no container
-was run. This is stated as **NOT EXECUTED — Docker unavailable** and is not
-claimed anywhere as working.
+**Docker was executed.** Docker 29.8.1 with Compose v5.5.1 on Windows, Linux
+containers. The image was built, the stack was started, and the deployed
+artefact was then driven: all 50 browser tests through real Chrome against the
+running container, plus a scripted pass over the organizer write path. The
+section below lists what was actually observed.
 
-Everything else below was run, and the counts are what the commands actually
-printed.
+Everything here was run, and the counts are what the commands actually printed.
 
 ---
 
@@ -30,15 +29,19 @@ printed.
 | Command | Result |
 | --- | --- |
 | `npm run typecheck` | Pass. Both projects: core/api/tests/scripts, then the web app. |
-| `npm test` | **441 passed**, 0 failed, 70 suites. |
+| `npm test` | **444 passed**, 0 failed, 70 suites. Includes the deployment test that builds the image and starts the stack when Docker is present. |
 | `npm run build` | Pass. 505.46 kB JS, 146.44 kB gzipped, 16.66 kB CSS. |
 | `npm run test:e2e` | **50 passed**, 0 failed, 8 suites, real Chrome against the built bundle. |
 | `npm run acceptance` | **35 of 35 checks passed.** |
 | `npm run check:openapi` | Up to date. 144 operations across 123 paths. |
 | `npm run verify` | All of the above, in order, green. |
-| `docker build` / `docker compose up` | **NOT EXECUTED — Docker unavailable.** |
-| Multi-viewport browser check | 4 viewports × 10 surfaces, as part of `test:e2e`. |
-| Clean-database migration + seed | Covered by every test harness; each boots a fresh database. |
+| `docker compose build` | Image built from a clean tree. 477 MB. |
+| `docker compose up -d` | Started, healthy in ~1 s, migrations applied on first boot, demo seeded, ready in 779 ms. |
+| `E2E_BASE_URL=… node --test apps/api/test/e2e/*` | **50 passed**, 0 failed, 8 suites, real Chrome against the **container**. |
+| Container organizer-path probe | 43 checks, all passed. |
+| `docker compose down -v && up -d` | Volume removed, database rebuilt from migrations, re-seeded. |
+| Multi-viewport browser check | 4 viewports × 10 surfaces, in both browser runs. |
+| Clean-database migration + seed | Every test harness, plus a fresh volume in the container. |
 | Old-schema upgrade (v11 → v15) | Covered by `migrations.test.ts`. |
 | Backup and restore round trip | Covered by `migrations.test.ts`. |
 
@@ -57,6 +60,92 @@ These come from a dataset far smaller than a large event, so they demonstrate th
 absence of an accidental blow-up rather than promising figures at 200 projects.
 Loose upper bounds are asserted in the suite (30 s boot, 3 s gallery and queue,
 20 s compute and reproduce) so that a dropped index surfaces as a failed bound.
+
+In the container, migrations on first boot plus the full demo seed completed in
+**779 ms**, and the app reported healthy within about a second of `up`.
+
+---
+
+## The container, specifically
+
+Everything in this section was observed on the running container, not reasoned
+about from the Dockerfile.
+
+| Claim | How it was checked | What happened |
+| --- | --- | --- |
+| Builds from a clean tree | `docker compose build` | Succeeded. 477 MB, two stages. |
+| Starts with no `.env` | `docker compose up -d` on a fresh clone's file list | Started. No configuration step. |
+| Migrations run on first boot | container log | `schema version 15 (applied 15)`, then the seed. |
+| The health check means something | `/api/ready` | `{"status":"ready","schemaVersion":15}`; `/api/health` also 200. |
+| Deep links resolve | `GET /projects/{id}` | 200 `text/html` — the SPA shell, not the API 404. |
+| An unknown API path is still JSON | `GET /api/definitely-not-here` | 404 `application/json`, with the error envelope. |
+| Data survives a restart | row counts, before and after `docker compose restart` | `19:3:257` before and after — identical. |
+| Data survives `down` / `up` | row counts after a full teardown and restart | `19 teams, 257 audit` — the volume held. |
+| `down -v` genuinely wipes | row counts after `down -v` | `12 teams, 24 users` — reseeded from scratch. |
+| Shutdown is graceful, not `SIGKILL` | `docker compose stop -t 25`, then `docker inspect` | Logged `SIGTERM received, shutting down (10000ms grace)`. `ExitCode=0`, `OOMKilled=false`. |
+| Runs as non-root | `id` inside the container | `uid=1000(node) gid=1000(node)`. |
+| `/data` is the only writable location | `touch /app/x` vs `touch /data/x` | `/app` read-only, `/data` writable. |
+| `tini` is really PID 1 | `/proc/1/comm` | `tini`. |
+| No test suite shipped | `ls /app/apps/api/test` | Does not exist. |
+| Dev dependencies are pruned | read `package.json` in the image | 4 declared, 1 present — `yaml`, which is also a real transitive production dependency of `@fastify/swagger`, so its presence is correct rather than a leak. `vite` and `typescript` are gone. |
+| The published bundle is what runs | 50 browser tests against the container | 50 passed, 0 failed. |
+| The organizer write path works in the image | scripted probe | 43 checks, all passed — see below. |
+
+### The organizer path, driven against the container
+
+A container that serves the shell but cannot write anything is still broken, so
+the whole path was exercised from outside the container: login, CSRF, creates,
+a gated read, a real export, an import dry run, a real import, diagnostics,
+participation records, logout.
+
+- **Session and CSRF.** Login 200; a write with no CSRF header 403
+  `CSRF_FAILED`; a write with a *wrong* token also 403.
+- **Creates return 201** for tracks, prizes, teams, conflicts and webhooks, and
+  each created record is then visible in its own list. A repeated track name
+  returns 201 with a derived slug rather than the 500 it used to.
+- **Identity boundary.** The organizer's submission list 200; the same call
+  anonymously 403 with a message pointing at the public gallery.
+- **All 13 declared export kinds downloaded**, each as a CSV attachment, none
+  empty. A 14th nonexistent kind is 422 rather than an empty file.
+- **Imports.** All four kinds accepted a dry run; a dry run wrote nothing; a
+  real import applied and appeared in the team list; an unknown captain email is
+  rejected naming row and column; a malformed CSV is refused with issues, not a
+  stack trace.
+- **Diagnostics.** Two consecutive `GET`s leave the flag count unchanged;
+  `POST` is accepted.
+- **Participation records.** A judge reads their own; an anonymous verifier gets
+  `VALID` with the integrity hash; the response contains no numeric score at any
+  depth; an unknown reference is `NOT_FOUND` rather than an error.
+- **Logout** 204, and the session is gone afterwards.
+
+### A defect the container found that no test had
+
+`POST /api/events/{eventId}/tracks` returned **500** with a raw
+`UNIQUE constraint failed: event_tracks.event_id, event_tracks.slug` in the log
+when a track name was repeated. `event_tracks` has a UNIQUE constraint on
+`(event_id, slug)`, and nothing derived a free slug the way teams and submissions
+already did — so an organizer adding a second track called "Applied AI" got "an
+unexpected error occurred". Fixed by deriving a unique slug, with two
+regression tests: one for the duplicate name, one asserting that every create
+route returns 201 on the happy path, which is the check whose absence let this
+survive.
+
+The first version of the track fix refused duplicates with 409 instead. That was
+wrong, and the test said so: the constraint is on the *slug*, not the name, and
+two tracks called "Applied AI" in different events is not a mistake. Derived
+slug is the behaviour teams have always had.
+
+### A limitation of running the suite against a shared server
+
+The browser suite is not idempotent against a server it does not own. It submits
+Yuki's two deliberately unfinished assignments, so a second run against the same
+container finds nothing left to score and two tests fail — pointing at
+autosave and pairwise completion rather than at anything real. Run it against a
+fresh volume, which `docker-compose.test.yml` provides. The same applies to
+`pairwise_comparisons` growing between runs.
+
+This is a property of the harness, not a product defect, and it is why
+`docker-compose.test.yml` uses a separate volume from the default stack.
 
 ---
 
@@ -133,9 +222,12 @@ Loose upper bounds are asserted in the suite (30 s boot, 3 s gallery and queue,
 
 | Requirement | Status | Evidence |
 | --- | --- | --- |
-| Single-command self-hosting | **Static review only** | `docker compose up` with **no `.env` file required**. The compose file supplies a public local-only session secret so the command works on a fresh clone; both the compose file and the README say in capitals that this is not a production secret and must be overridden. **NOT EXECUTED — Docker unavailable.** |
-| Health check that means something | Met (static) | `/api/ready`, not `/api/health`; reviewed, not run. |
-| Graceful shutdown | Met (static) | `tini` as PID 1, 20 s stop grace, app drains with its own 10 s timer. |
+| Single-command self-hosting | **Verified in Docker** | `docker compose up` with **no `.env` file required** — run on a clean tree and it started, became healthy, applied migrations and seeded. The compose file supplies a public local-only session secret so the command works on a fresh clone; both the compose file and the README say in capitals that this is not a production secret and must be overridden. |
+| Health check that means something | Verified | `/api/ready`, not `/api/health`; both probed in the container. `/api/ready` returned `{"status":"ready","schemaVersion":15}`. |
+| Graceful shutdown | Verified | `tini` confirmed as PID 1 via `/proc/1/comm`. `docker compose stop -t 25` produced `SIGTERM received, shutting down (10000ms grace)` and `ExitCode=0`, `OOMKilled=false` — a drain, not a `SIGKILL`. |
+| The deployed artefact actually works | Verified | All 50 browser tests pass through real Chrome against the running container, plus a 43-check scripted pass over the organizer write path. |
+| Data survives a restart and a teardown | Verified | Row counts identical across `docker compose restart` and across `down`/`up`; `down -v` wiped and reseeded. |
+| Runtime is hardened as documented | Verified | `uid=1000(node)`, `/app` read-only, `/data` writable, no test files shipped, dev dependencies pruned. |
 | Openly licensed | Met | Full Apache-2.0 `LICENSE` with the correct copyright line. Nine of the nine required sections are asserted by `deployment.test.ts`, so a truncated or wrong-text licence fails the suite. |
 | Every declared export kind actually works | Met | All 13 CSV export kinds exercised against a seeded event, not merely listed in a manifest. |
 | Every declared import kind is implemented | Met | The `SUBMISSIONS` bulk import that the manifest advertised and the server refused is implemented, and the capability test drives a real import rather than checking a constant. |
@@ -152,7 +244,7 @@ Loose upper bounds are asserted in the suite (30 s boot, 3 s gallery and queue,
 | Threat model | Met | `THREAT-MODEL.md`: the general web surface, plus a section each on Sybil voting, ballot stuffing, submission scraping, judge collusion and deadline gaming. |
 | API reference | Met | `API.md`. The six documented defects in the published document are **fixed**, and the document is now checked against a live server by `openapi-truth.test.ts` on every `npm test`. |
 | Development guide | Met | `DEVELOPMENT.md`. |
-| Test suite | Met | 441 unit/integration, 50 browser, 35 acceptance. |
+| Test suite | Met | 444 unit/integration, 50 browser, 35 acceptance. |
 
 ---
 
@@ -193,6 +285,16 @@ Recorded because each is the kind that survives a demo and fails an event.
 24. `SUBMISSIONS` appeared in the advertised import kinds and was refused by the server.
 25. Nine of the thirteen declared CSV export kinds were not implemented or would have written an empty file.
 
+**Found by running the container**
+
+26. `POST /api/events/{eventId}/tracks` returned **500** with a raw
+    `UNIQUE constraint failed: event_tracks.event_id, event_tracks.slug` whenever
+    a track name repeated. Nothing derived a free slug the way teams and
+    submissions already did, so a normal act of event configuration — adding a
+    second track — produced a server error. Fixed, with a regression test for the
+    duplicate and a second test asserting every create route returns 201, which
+    is the check whose absence let it survive.
+
 ---
 
 ## Known limitations
@@ -200,10 +302,21 @@ Recorded because each is the kind that survives a demo and fails an event.
 Stated rather than hidden. None is a surprise; all are recorded in the docs.
 
 **Deployment**
-- **Docker was never executed.** No image build, no container run, no compose
-  verification. The files were reviewed and corrected statically.
+- Verified on **Docker 29.8.1 / Compose v5.5.1 with Linux containers on
+  Windows**. Not verified on Docker Desktop for Mac, on ARM, on Podman, or on
+  any version other than 29.x — the compose file uses no platform-specific
+  behaviour, but that is reasoning rather than observation.
 - No signed images, no image pinning to a digest, and the base image tag
-  (`node:24-bookworm-slim`) floats.
+  (`node:24-bookworm-slim`) floats. The image is **477 MB**, which is large for
+  one process and one SQLite file; the cause is the full `node:24` toolchain
+  plus the pruned workspace in the runtime layer, not the application.
+- The container runs a single instance by design. Two against one volume would
+  not corrupt SQLite, but each would keep its own rate-limit counters.
+- **Offline runtime was not re-verified in the image.** The application makes no
+  outbound calls except webhook deliveries, which are opt-in, and the browser
+  suite passing against the container shows no network dependency at runtime.
+  A true air-gapped run — `docker run` with no network at all — was not
+  performed.
 
 **Scale**
 - **One instance, by design.** A single SQLite writer. Two instances against one
@@ -255,7 +368,7 @@ Stated rather than hidden. None is a surprise; all are recorded in the docs.
 
 ## Release checklist
 
-- [x] `npm run verify` green: typecheck, 441 unit/integration, build, 50 browser, 35 acceptance
+- [x] `npm run verify` green: typecheck, 444 unit/integration, build, 50 browser, 35 acceptance
 - [x] OpenAPI document current, and checked against a live server on every test run
 - [x] Result pipeline deterministic and reproducible, verified from stored reviews
 - [x] Published results immutable, corrections supersede rather than rewrite
@@ -269,7 +382,9 @@ Stated rather than hidden. None is a surprise; all are recorded in the docs.
 - [x] Backup and restore tested end to end, including result reproduction
 - [x] `docker compose up` needs no `.env`; Apache-2.0 `LICENSE` present and asserted by test
 - [x] Documentation complete: architecture, judging, data model, API, threat model, development, operations
-- [ ] Docker image and compose stack actually built and run — **NOT EXECUTED, Docker unavailable in this environment**
+- [x] **Docker image built, container run, and the deployed artefact driven** — image builds clean, starts with no `.env`, applies migrations, seeds, survives restart and `down`/`up`, wipes on `down -v`, drains gracefully as non-root; 50 browser tests and a 40-check organizer probe pass against it
+- [x] Every create route returns its documented status; a duplicate track name is no longer a 500
 - [ ] **Restore from a production backup** — tested procedurally, not against production data
+- [ ] **Air-gapped container run** — runtime is offline-capable by design and the browser suite passes against the container, but no `docker run --network none` was performed
 - [x] No secrets, credentials or `.env` committed
 - [x] All commits authored and committed by the repository owner alone

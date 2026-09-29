@@ -60,7 +60,18 @@ export type BrowserHarness = {
   base: string;
   browser: Browser;
   eventId: string;
-  db: Database;
+  /**
+   * The database, or `null` when this harness is pointed at an already-running
+   * server rather than one it started itself.
+   *
+   * A test that wants to assert "this reached the database" has to skip itself
+   * in that mode, because the database is behind a volume it has no business
+   * reaching into. `db` being `null` is the signal, so the skip is explicit
+   * rather than silent.
+   */
+  db: Database | null;
+  /** True when `base` is somebody else's server, not one this process started. */
+  external: boolean;
   /** A fresh context with a clean cookie jar, as a new visitor would have. */
   /**
    * A brand-new signed-out context.
@@ -91,7 +102,28 @@ async function launch(): Promise<Browser> {
   }
 }
 
-export async function createBrowserHarness(options: { seed?: boolean; dir?: string } = {}): Promise<BrowserHarness> {
+/**
+ * Point the browser suite at a server that is already running.
+ *
+ * The value of this is testing the *deployed* artefact rather than the source:
+ * the same 50 browser tests, driven through Chrome, against a container built
+ * from the Dockerfile with a production dependency tree, a non-root user and the
+ * published SPA bundle. Everything else in the suite runs against a server the
+ * test process started, which is the dev configuration - a different one.
+ *
+ * Set `E2E_BASE_URL` and nothing is started, nothing is seeded, and `db` is
+ * `null`. The target is expected to already be seeded; `eventId` is read from
+ * it over the public API.
+ */
+export async function createBrowserHarness(
+  options: { seed?: boolean; dir?: string; base?: string } = {},
+): Promise<BrowserHarness> {
+  const external = options.base ?? process.env.E2E_BASE_URL ?? null;
+
+  if (external !== null && external !== '') {
+    return attachToRunningServer(external);
+  }
+
   if (!bundlePresent()) {
     throw new Error('apps/web/dist is missing — run `npm run build` before the browser E2E suite');
   }
@@ -185,6 +217,7 @@ export async function createBrowserHarness(options: { seed?: boolean; dir?: stri
     browser,
     eventId: eventRow.id,
     db,
+    external: false,
     freshContext,
     signedIn,
     shot: async (page: Page, name: string): Promise<void> => {
@@ -198,6 +231,92 @@ export async function createBrowserHarness(options: { seed?: boolean; dir?: stri
       // Only remove the directory when this harness created it, so a caller
       // that supplied one keeps control of its own files.
       if (owned) rmSync(dir, { recursive: true, force: true });
+    },
+  };
+}
+
+/**
+ * A harness over a server somebody else is running.
+ *
+ * Nothing is started and nothing is seeded, so this is deliberately thin: the
+ * cookie plumbing, the browser launch and the event id are all that a test
+ * needs. The event id comes from the public events list rather than the
+ * database, which is the only honest way to learn it without a direct handle on
+ * a file the container owns.
+ */
+async function attachToRunningServer(base: string): Promise<BrowserHarness> {
+  mkdirSync(SHOTS, { recursive: true });
+  const target = base.replace(/\/+$/, '');
+
+  const events = await fetch(`${target}/api/events`);
+  if (!events.ok) {
+    throw new Error(`E2E_BASE_URL is set to ${target} but ${target}/api/events returned ${String(events.status)}`);
+  }
+  const body = (await events.json()) as { data?: { id: string }[] };
+  const eventId = body.data?.[0]?.id;
+  if (eventId === undefined) {
+    throw new Error(`${target} has no events, so there is nothing to test. Is it seeded? (AUTO_SEED=true)`);
+  }
+
+  const browser = await launch();
+
+  const freshContext = async (contextOptions: ContextOptions = {}): Promise<BrowserContext> => {
+    const context = await browser.newContext({
+      baseURL: target,
+      viewport: contextOptions.viewport ?? VIEWPORTS.desktop,
+      locale: 'en-GB',
+      timezoneId: 'UTC',
+      ...(contextOptions.reducedMotion === undefined ? {} : { reducedMotion: contextOptions.reducedMotion }),
+    });
+    context.setDefaultTimeout(20_000);
+    return context;
+  };
+
+  return {
+    base: target,
+    browser,
+    eventId,
+    db: null,
+    external: true,
+    freshContext,
+    signedIn: async (email: string, contextOptions: ContextOptions = {}): Promise<Page> => {
+      const context = await freshContext(contextOptions);
+      const page = await context.newPage();
+      const response = await context.request.post(`${target}/api/auth/login`, {
+        data: { email, password: DEMO_PASSWORD },
+      });
+      if (!response.ok()) {
+        throw new Error(`could not sign in as ${email} on ${target}: ${String(response.status())}`);
+      }
+      // Playwright's request context has its own cookie jar; copy the session
+      // across so the page is genuinely authenticated, and derive the domain
+      // from the target rather than assuming 127.0.0.1.
+      const url = new URL(target);
+      const domain = url.hostname;
+      const setCookie = response.headersArray().filter((h) => h.name.toLowerCase() === 'set-cookie');
+      await context.addCookies(
+        setCookie
+          .map((header) => header.value ?? '')
+          .map((value) => value.split(';')[0] ?? '')
+          .filter((pair) => pair.includes('='))
+          .map((pair) => {
+            const index = pair.indexOf('=');
+            return {
+              name: pair.slice(0, index).trim(),
+              value: pair.slice(index + 1).trim(),
+              domain,
+              path: '/',
+            };
+          }),
+      );
+      return page;
+    },
+    shot: async (page: Page, name: string): Promise<void> => {
+      mkdirSync(SHOTS, { recursive: true });
+      await page.screenshot({ path: join(SHOTS, `${name}.png`), fullPage: true }).catch(() => undefined);
+    },
+    close: async () => {
+      await browser.close();
     },
   };
 }
