@@ -389,6 +389,195 @@ a {
 .hero h1 { color: #fff; }
 .hero p { color: rgb(255 255 255 / 88%); max-width: 62ch; }
 
+/* ------------------------------------------------------- the hero's lab */
+
+/*
+ * An instrument panel rather than a card with rounded corners and a drop
+ * shadow: it sits on the same surface the rest of the page uses, because the
+ * point of it is that this is the product, not an illustration of it. The one
+ * thing it does get is a hairline, so it reads as a distinct instrument.
+ */
+.lab-band {
+  margin-top: var(--space-5);
+}
+
+.lab {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--surface-raised);
+  padding: var(--space-5);
+}
+
+.lab__title {
+  font-size: 19px;
+  margin: 0;
+  /* 68ch, not the 62ch the hero paragraph uses: this is the second-most
+   * prominent sentence on the page and reads at 19px. */
+  max-width: 68ch;
+}
+
+.lab__sub {
+  margin: var(--space-2) 0 0;
+  color: var(--text-secondary);
+  max-width: 78ch;
+}
+
+/*
+ * The slider row is its own grid rather than a flex line so the label, the
+ * track and the readout keep fixed proportions: on a narrow screen the track
+ * takes the whole width instead of being squeezed to nothing by a long label.
+ */
+.lab__control {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  margin: var(--space-5) 0 var(--space-4);
+}
+
+.lab__label {
+  font-size: 14px;
+  font-weight: 560;
+  color: var(--text-primary);
+}
+
+/*
+ * The units of the control, on their own line. "Yuki's generosity" alone does
+ * not say generosity in *points of raw score*, and a visitor who does not know
+ * that will assume the slider is an opinion rather than a number fed into the
+ * aggregation - which is the one thing this panel must not let them think.
+ */
+.lab__label-note {
+  display: block;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
+.lab__value {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--verdict-indigo);
+  background: color-mix(in srgb, var(--verdict-indigo) 10%, var(--surface-raised));
+  border: 1px solid color-mix(in srgb, var(--verdict-indigo) 28%, transparent);
+  border-radius: var(--radius-pill);
+  padding: 3px 10px;
+  /* Fixed width, so the readout does not reflow the track as the number grows
+   * from two digits to three. */
+  min-width: 88px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.lab__range {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  width: 100%;
+  height: 40px;
+  margin: 0;
+  background: transparent;
+  accent-color: var(--verdict-indigo);
+  cursor: pointer;
+}
+
+/* A visible focus ring on the only control in the panel. */
+.lab__range:focus-visible {
+  outline: 2px solid var(--verdict-indigo);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+.lab__table-wrap {
+  margin: 0;
+}
+
+.lab__table {
+  width: 100%;
+  table-layout: fixed;
+}
+
+.lab__caption {
+  caption-side: top;
+  text-align: left;
+  font-size: 12px;
+  color: var(--text-muted);
+  padding-bottom: var(--space-2);
+  /* A caption is the table's accessible name, so it is descriptive rather than
+   * a visual caption - but it still needs to read as one. */
+  max-width: 70ch;
+}
+
+.lab__project {
+  text-align: left;
+  font-weight: 560;
+  width: 40%;
+}
+
+/* Shown only on narrow screens, where the score column is dropped. */
+.lab__mean-inline {
+  display: none;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.lab__num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  width: 20%;
+}
+
+.lab__rank {
+  display: inline-block;
+  min-width: 28px;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+/*
+ * The final ranking is the one being defended, so it is the one that looks like
+ * an answer. The averaged rank stays visually quiet, which is the argument: it
+ * is the number the panel exists to distrust.
+ */
+.lab__rank--final {
+  background: color-mix(in srgb, var(--verdict-indigo) 14%, var(--surface-raised));
+  color: var(--text-primary);
+  font-weight: 620;
+}
+
+.lab__finding {
+  margin: var(--space-4) 0 0;
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border-subtle);
+  font-size: 14px;
+  color: var(--text-secondary);
+  max-width: 80ch;
+}
+
+/*
+ * On a phone the two rank columns and the score are all short numbers, so the
+ * table still fits - but the header text does not. Letting the headers wrap
+ * keeps every column visible instead of pushing one out of a scroll container.
+ */
+@media (max-width: 560px) {
+  .lab { padding: var(--space-4); }
+  .lab__title { font-size: 17px; }
+  .lab__table thead th { font-size: 11px; }
+  .lab__table th,
+  .lab__table td { padding: 8px 5px; }
+  /* Three columns, so "averaged" and "normalized" each get a third of the width
+   * and survive on one line. The mean moves under the project name. */
+  .lab__num--mean { display: none; }
+  .lab__mean-inline { display: block; }
+  .lab__project { width: 34%; }
+  .lab__num { width: 33%; }
+  .lab__th-prefix { display: none; }
+}
+
 /*
  * The sign-in surface keeps its grain behind the whole column rather than in a
  * card, so the form sits on the same toothed field as the landing page without

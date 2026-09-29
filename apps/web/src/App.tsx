@@ -11,6 +11,7 @@ import { NavLink, Navigate, Route, Routes, useParams } from 'react-router-dom';
 import { Loading } from './ui.tsx';
 import { useSession } from './session.tsx';
 import { Grainient } from './components/Grainient.tsx';
+import { GenerosityLab } from './hero/GenerosityLab.tsx';
 import { EventsPage } from './pages/EventsPage.tsx';
 import { EventPage } from './pages/EventPage.tsx';
 import { ResultsPage } from './pages/ResultsPage.tsx';
@@ -132,6 +133,18 @@ function Landing() {
             </NavLink>
           ) : null}
         </div>
+      </div>
+
+      {/*
+        The interactive half of the opening screen, and the first thing a visitor
+        can touch. It sits directly under the hero rather than inside it: the
+        hero's job is the one-sentence claim, and a four-row instrument panel
+        sharing a gradient with it flattens both. Placing it here keeps the h1
+        the loudest thing on the page while making the page something other than
+        a wall of prose.
+      */}
+      <div className="lab-band">
+        <GenerosityLab />
       </div>
 
       <div className="stack" style={{ marginTop: 32 }}>

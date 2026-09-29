@@ -421,6 +421,35 @@ export function assignPrizes(
 /* ------------------------------------------------- ranking confidence */
 
 /**
+ * Rank aggregated projects on the *raw* mean, before normalization.
+ *
+ * This exists to answer one question honestly: what would a leaderboard have
+ * said if nobody had corrected for how generous each judge is? It is the
+ * counterfactual the published result is measured against, and
+ * `ResultEntry.rankRaw` carries it.
+ *
+ * It lives here rather than in `result-pipeline.ts` because it operates on
+ * `RankedEntry` and needs no hashing - which also means the browser can import
+ * it. The result pipeline computes its integrity hash with `node:crypto`, so
+ * importing anything from that module pulls a Node built-in into a bundle that
+ * has no business having one. Ranking does not need a hash, so ranking lives on
+ * this side of that line, and both the server and the browser get this exact
+ * function rather than two implementations that agree today.
+ */
+export function rankByRaw(projects: readonly AggregatedProject[]): RankedEntry[] {
+  const sorted = [...projects].sort((a, b) => {
+    const av = a.rawAggregate;
+    const bv = b.rawAggregate;
+    if (av === null && bv === null) return a.projectId < b.projectId ? -1 : 1;
+    if (av === null) return 1;
+    if (bv === null) return -1;
+    if (av !== bv) return bv - av;
+    return a.projectId < b.projectId ? -1 : 1;
+  });
+  return sorted.map((project, index) => ({ ...project, rank: index + 1, tieGroup: 0, tiedWith: [] }));
+}
+
+/**
  * A small, honest confidence signal for the organizer dashboard: the spread
  * between the winner and the runner-up, expressed both absolutely and relative
  * to the panel's own dispersion. Not a probability — a descriptive statistic.

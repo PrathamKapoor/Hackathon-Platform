@@ -28,6 +28,7 @@ import {
   type RankedEntry,
   assignPrizes,
   aggregateProjects,
+  rankByRaw,
   rankingConfidence,
 } from './aggregation.ts';
 import { contentHash, sha256Hex, canonicalJson } from './integrity.ts';
@@ -405,17 +406,17 @@ export function computeResultRun(input: ResultRunInput): ResultRun {
   };
 }
 
+/**
+ * Rank on the raw mean, before normalization.
+ *
+ * Delegates to `rankByRaw` in `aggregation.ts`. The body used to live here, and
+ * the only reason it moved is that this module imports `node:crypto` for the
+ * integrity hash: anything exported from here drags a Node built-in into a
+ * browser bundle. One implementation, reachable from both sides.
+ */
 function rankBy(projects: readonly AggregatedProject[], basis: 'raw'): RankedEntry[] {
-  const sorted = [...projects].sort((a, b) => {
-    const av = basis === 'raw' ? a.rawAggregate : a.aggregateScore;
-    const bv = basis === 'raw' ? b.rawAggregate : b.aggregateScore;
-    if (av === null && bv === null) return a.projectId < b.projectId ? -1 : 1;
-    if (av === null) return 1;
-    if (bv === null) return -1;
-    if (av !== bv) return bv - av;
-    return a.projectId < b.projectId ? -1 : 1;
-  });
-  return sorted.map((p, index) => ({ ...p, rank: index + 1, tieGroup: 0, tiedWith: [] }));
+  if (basis === 'raw') return rankByRaw(projects);
+  return [...projects].map((project, index) => ({ ...project, rank: index + 1, tieGroup: 0, tiedWith: [] }));
 }
 
 function groupBy<T>(items: readonly T[], key: (item: T) => string): [string, T[]][] {
