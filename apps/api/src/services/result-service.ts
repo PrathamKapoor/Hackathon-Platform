@@ -435,7 +435,7 @@ export class ResultService {
    * Publish a snapshot. This is the point of no return: the database refuses to
    * modify a published snapshot's hash, entries, or deletion afterwards.
    */
-  publish(eventId: string, snapshotId: string, ctx: ActorContext): SnapshotRow {
+  publish(eventId: string, snapshotId: string, ctx: ActorContext & { override?: boolean }): SnapshotRow {
     const actor = requireActor(ctx);
     const event = this.events.require(eventId);
     this.events.assertOrganizer(actor, event, ctx);
@@ -443,6 +443,47 @@ export class ResultService {
     const snapshot = this.requireSnapshot(snapshotId);
     if (snapshot.is_published === 1) {
       throw errors.conflict('That snapshot is already published.');
+    }
+
+    /*
+     * Results are hidden while voting is open, and this is where that is
+     * enforced.
+     *
+     * Vote *totals* were already hidden properly: the gallery omits the key
+     * entirely when the event hides them, rather than sending a count and
+     * trusting the client not to render it. But the *ranking* had no such guard.
+     * An organizer could compute, snapshot and publish with the voting window
+     * still open, and the leaderboard - the thing people are voting on - went
+     * public mid-vote. Nothing stopped it, and the requirement is not an
+     * organiser's good intentions.
+     *
+     * Only enforced when voting is actually enabled, and escapable with an
+     * explicit `override` that is written to the audit ledger with the same
+     * shape as every other override in the system. An organizer who has closed
+     * voting early by hand and needs to publish should not be locked out of
+     * their own event; an organizer who publishes over a live vote should have
+     * to say so in writing.
+     */
+    if (event.voting_enabled === 1) {
+      const voting = this.events.window(event, 'voting', ctx.at);
+      if (voting.open && ctx.override !== true) {
+        this.audit.record({
+          action: 'results.published',
+          actorId: actor.id,
+          actorRoles: actor.roles,
+          eventId,
+          resourceType: 'resultSnapshot',
+          resourceId: snapshotId,
+          requestId: ctx.requestId,
+          outcome: 'DENIED',
+          metadata: { reason: 'voting window still open', votingOpensAt: voting.opensAt, votingClosesAt: voting.closesAt },
+          at: ctx.at,
+        });
+        throw errors.preconditionFailed(
+          `Community voting for "${event.name}" is still open${voting.closesAt === null ? '' : ` until ${voting.closesAt}`}, so the result cannot be published. ` +
+            'Close voting first, or re-send with override and a reason - either way it will be recorded in the audit ledger.',
+        );
+      }
     }
 
     // Recompute before publishing. Publishing a result that no longer
@@ -744,7 +785,51 @@ export class ResultService {
 
   /* ===================================================== diagnostics */
 
-  computeDiagnostics(eventId: string, ctx: ActorContext) {
+  /**
+   * Read the panel's health. Pure: it computes and returns, and writes nothing.
+   *
+   * This used to also record the signals as review flags, from a `GET`. The
+   * reasoning at the time was defensible - computing diagnostics is how you
+   * notice things, so a link preview that computed them would not lose the
+   * signal - but it made a read something nobody can reason about safely: the
+   * same call from an organizer, a crawler, a prefetch and a retry produced four
+   * audit rows and four flag writes, and a `GET` that writes cannot be cached,
+   * crawled, or speculatively prefetched by anything.
+   *
+   * Recording is a deliberate act now: `POST /api/events/{eventId}/diagnostics`.
+   * The computation is identical, so the two cannot disagree about what the panel
+   * looks like.
+   */
+  readDiagnostics(eventId: string, ctx: ActorContext) {
+    return this.diagnosticReport(eventId, ctx);
+  }
+
+  /**
+   * Compute the panel's health and record the signals as review flags, so a
+   * signal noticed at 2am is still there in the morning.
+   */
+  recordDiagnostics(eventId: string, ctx: ActorContext) {
+    const actor = requireActor(ctx);
+    const diagnostics = this.diagnosticReport(eventId, ctx);
+
+    this.persistAnomalies(eventId, diagnostics.signals, ctx);
+
+    this.audit.record({
+      action: 'diagnostics.computed',
+      actorId: actor.id,
+      actorRoles: actor.roles,
+      eventId,
+      resourceType: 'judgeDiagnostic',
+      requestId: ctx.requestId,
+      metadata: { signals: diagnostics.signals.length, judges: diagnostics.judges.length, projects: diagnostics.projects.length, recorded: true },
+      at: ctx.at,
+    });
+
+    return diagnostics;
+  }
+
+  /** The computation itself, shared by both routes. Writes nothing. */
+  private diagnosticReport(eventId: string, ctx: ActorContext) {
     const actor = requireActor(ctx);
     this.events.assertOrganizer(actor, this.events.require(eventId), ctx);
     const rubricRow = this.rubrics.requireActiveVersion(eventId);
@@ -773,7 +858,7 @@ export class ResultService {
           }
         : undefined;
 
-    const diagnostics = computeDiagnostics({
+    return computeDiagnostics({
       eventId,
       rubricVersionId: rubricRow.id,
       assignmentVersion: this.assignments.currentVersion(eventId),
@@ -785,21 +870,6 @@ export class ResultService {
       computedAt: ctx.at,
       ...(votes ? { votes } : {}),
     });
-
-    this.persistAnomalies(eventId, diagnostics.signals, ctx);
-
-    this.audit.record({
-      action: 'diagnostics.computed',
-      actorId: actor.id,
-      actorRoles: actor.roles,
-      eventId,
-      resourceType: 'judgeDiagnostic',
-      requestId: ctx.requestId,
-      metadata: { signals: diagnostics.signals.length, judges: diagnostics.judges.length, projects: diagnostics.projects.length },
-      at: ctx.at,
-    });
-
-    return diagnostics;
   }
 
   private diagnosticRecords(eventId: string): ReviewRecord[] {

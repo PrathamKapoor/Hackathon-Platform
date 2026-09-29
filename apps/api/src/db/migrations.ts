@@ -1196,6 +1196,62 @@ CREATE UNIQUE INDEX idx_participation_unique
   ON judge_participation_records (event_id, judge_id, assignment_version);
 `,
   },
+  {
+    version: 15,
+    name: 'export-kind-coverage',
+    sql: `
+-- ------------------------------------------------- export kind coverage
+
+-- export_jobs.kind was constrained to eight values while the API, the
+-- TypeScript union, the export manifest and the organizer's own button row all
+-- advertised thirteen. The six kinds outside the constraint - REGISTRATIONS,
+-- JUDGES, VOTES, COMMENTS, ANOMALIES and WEBHOOKS - built their CSV, then died
+-- recording it, so a download that worked for six entities returned HTTP 500 for
+-- the other seven. The route was advertised and the manifest listed it; the only
+-- reason nobody had noticed is that no test asked for a positive export.
+--
+-- SQLite cannot alter a CHECK constraint, so the table is rebuilt: copy, drop,
+-- rename, recreate the index. The rows are preserved.
+--
+-- The CHECK is kept, deliberately. It is a real list of what may be exported, and
+-- widening it to match the application is the fix; removing it would let a typo
+-- in a future export kind record itself as a completed job of something that
+-- does not exist.
+
+CREATE TABLE export_jobs_wide (
+  id           TEXT PRIMARY KEY,
+  event_id     TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  kind         TEXT NOT NULL
+                 CHECK (kind IN (
+                   'PARTICIPANTS','REGISTRATIONS','TEAMS','SUBMISSIONS','ASSIGNMENTS',
+                   'SCORES','RESULTS','AUDIT','JUDGES','VOTES','COMMENTS',
+                   'ANOMALIES','WEBHOOKS','ALL'
+                 )),
+  status       TEXT NOT NULL DEFAULT 'PENDING'
+                 CHECK (status IN ('PENDING','COMPLETED','FAILED')),
+  row_count    INTEGER NOT NULL DEFAULT 0,
+  checksum     TEXT NOT NULL DEFAULT '',
+  created_by   TEXT NOT NULL REFERENCES users(id),
+  created_at   TEXT NOT NULL,
+  completed_at TEXT
+) STRICT;
+
+INSERT INTO export_jobs_wide (id, event_id, kind, status, row_count, checksum, created_by, created_at, completed_at)
+  SELECT id, event_id, kind, status, row_count, checksum, created_by, created_at, completed_at
+  FROM export_jobs;
+
+DROP TABLE export_jobs;
+ALTER TABLE export_jobs_wide RENAME TO export_jobs;
+CREATE INDEX idx_export_jobs_event ON export_jobs (event_id, created_at);
+
+-- ---------------------------------------------------------------- import
+
+-- import_jobs.kind listed SUBMISSIONS while no importer existed for it: a
+-- declared capability with nothing behind it. Rather than leave a fourth kind
+-- the type promised and the application could not deliver, the submissions
+-- importer now exists and the declaration is true.
+`,
+  },
 ];
 
 export function runMigrations(db: DatabaseSync): { applied: number[]; version: number } {

@@ -65,14 +65,28 @@ export function registerInsightRoutes(app: FastifyInstance, services: Services, 
     const params = z.object({ eventId: Id }).parse(request.params);
     const eventId = eventIdOf(services, params.eventId);
     requirePermission(services, request.ctx, 'diagnostic', 'read', { inOrganizedEvent: canManageEvent(request.ctx.actor, eventId) }, { eventId, resourceType: 'judgeDiagnostic' });
-    return services.results.computeDiagnostics(eventId, ctx(request));
+    return services.results.readDiagnostics(eventId, ctx(request));
   });
   registry.register({
     method: 'GET', path: '/api/events/{eventId}/diagnostics', tags: ['diagnostics'], auth: 'organizer',
     summary: 'Panel health: per-judge and per-project statistics, and the review signals they raise.',
     permission: { resource: 'diagnostic', action: 'read' },
     description:
-      'Reports mean, median, standard deviation, range, completion rate, per-criterion distributions, panel deviation, timing anomalies and repeated scoring patterns. A signal is a request for a human to look, never a finding of misconduct: the platform does not accuse, it points. Computing also records the signals as review flags so they cannot be lost.',
+      'Reports mean, median, standard deviation, range, completion rate, per-criterion distributions, panel deviation, timing anomalies and repeated scoring patterns. A signal is a request for a human to look, never a finding of misconduct: the platform does not accuse, it points. This is a pure read - it records nothing. Use POST on the same path to file the signals as review flags.',
+  });
+
+  app.post('/api/events/:eventId/diagnostics', async (request) => {
+    const params = z.object({ eventId: Id }).parse(request.params);
+    const eventId = eventIdOf(services, params.eventId);
+    requirePermission(services, request.ctx, 'anomaly', 'create', { inOrganizedEvent: canManageEvent(request.ctx.actor, eventId) }, { eventId, resourceType: 'judgeDiagnostic' });
+    return services.results.recordDiagnostics(eventId, ctx(request));
+  });
+  registry.register({
+    method: 'POST', path: '/api/events/{eventId}/diagnostics', tags: ['diagnostics'], auth: 'organizer',
+    summary: 'Compute panel health and file the signals as review flags.',
+    permission: { resource: 'anomaly', action: 'create' },
+    description:
+      'Runs the same computation as the GET and additionally records every signal as a review flag, so something noticed at 2am is still there in the morning. Flags are deduplicated, so running it twice does not double the register. Requires anomaly:create rather than diagnostic:read, because it is the act of filing something, not of looking.',
   });
 
   app.get('/api/events/:eventId/anomalies', async (request) => {
@@ -315,6 +329,58 @@ export function registerInsightRoutes(app: FastifyInstance, services: Services, 
   registry.register({
     method: 'GET', path: '/api/events/{eventId}/participation-records', tags: ['certificates'], auth: 'organizer',
     summary: 'Participation records issued for this event.', permission: { resource: 'participationRecord', action: 'read' },
+  });
+
+  /*
+   * The two routes that make the record worth having.
+   *
+   * Without them, "publicly verifiable judge participation records" was a claim
+   * about a database column: the hash was computed, stored, and never checked by
+   * anyone. A judge could not read their own record - the matrix granted
+   * `participationRecord: 'OWN'` to JUDGE and PARTICIPANT and no route ever
+   * exercised it - and a third party could not check one, because the only read
+   * route is organizer-scoped and the public certificate verifier keys on the
+   * `certificates` table and returns NOT_FOUND for a `JPR-` code.
+   *
+   * So: a record holder can verify it, and a judge can get their own. Neither
+   * needs an account for the first, and the second needs only their own.
+   */
+  app.get('/api/participation-records/mine', async (request) => {
+    if (request.ctx.user === null) throw errors.unauthenticated();
+    const rows = services.certificates.findParticipationForUser(request.ctx.user.id);
+    return {
+      data: rows.map((row) => ({
+        id: row.id,
+        eventId: row.event_id,
+        reference: row.reference,
+        assignmentVersion: row.assignment_version,
+        judgingOpensAt: row.judging_opens_at,
+        judgingClosesAt: row.judging_closes_at,
+        assignedCount: row.assigned_count,
+        completedCount: row.completed_count,
+        completionStatus: row.completion_status,
+        integrityHash: row.integrity_hash,
+        issuedAt: row.issued_at,
+        detail: parseJson(row.detail),
+        verifyUrl: `/api/participation-records/${row.reference}`,
+      })),
+    };
+  });
+  registry.register({
+    method: 'GET', path: '/api/participation-records/mine', tags: ['certificates'], auth: 'session',
+    summary: 'Your own judge participation records.',
+    permission: { resource: 'participationRecord', action: 'read' },
+    description: 'The record of what you did on any panel you sat on. Each entry carries a public verification path, so it can be shown to a third party without an account.',
+  });
+
+  app.get('/api/participation-records/:reference', async (request) => {
+    const params = z.object({ reference: z.string().min(6).max(40) }).parse(request.params);
+    return services.certificates.verifyParticipation(params.reference);
+  });
+  registry.register({
+    method: 'GET', path: '/api/participation-records/{reference}', tags: ['certificates'], auth: 'none',
+    summary: 'Verify a judge participation record.',
+    description: 'Recomputes the record\'s hash from its own contents and reports VALID, TAMPERED or NOT_FOUND. Needs no account: the hash covers the content, so anyone holding the record can check it. This is a content hash rather than a digital signature - it proves the record is unaltered, not which deployment issued it.',
   });
 
   /* ============================================================ moderation */

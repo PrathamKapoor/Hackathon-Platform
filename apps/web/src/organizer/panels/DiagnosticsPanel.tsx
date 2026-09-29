@@ -61,9 +61,20 @@ export function DiagnosticsPanel({ eventId }: { eventId: string }) {
         description="Per-judge and per-project statistics computed from the submitted reviews. An anomaly is not misconduct — it is a number that justifies a human asking a question."
         error={error}
         actions={
-          <button type="button" className="button button--primary" disabled={busy} onClick={() => void act(() => api.get(`/api/events/${eventId}/diagnostics`))}>
-            {busy ? 'Recomputing…' : 'Recompute'}
-          </button>
+          <>
+            {/*
+              A POST, not a GET. This button files the signals as review flags,
+              so the read that renders the panel above stays a read - it can be
+              cached, prefetched and reloaded without writing four audit rows and
+              four flag writes each time somebody looks at the page.
+            */}
+            <button type="button" className="button button--primary" disabled={busy} onClick={() => void act(() => api.post(`/api/events/${eventId}/diagnostics`))}>
+              {busy ? 'Recomputing…' : 'Recompute and file signals'}
+            </button>
+            <button type="button" className="button" disabled={busy} onClick={() => void act(() => api.get(`/api/events/${eventId}/diagnostics`))}>
+              Recompute only
+            </button>
+          </>
         }
       >
         {loading ? <span className="muted small">Computing…</span> : null}

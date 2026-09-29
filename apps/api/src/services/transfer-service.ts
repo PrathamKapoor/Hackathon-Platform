@@ -22,11 +22,48 @@ import type { ActorContext, Services } from './context.ts';
 import { requireActor } from './context.ts';
 import { slugify } from './event-service.ts';
 
-export type ExportKind =
-  | 'PARTICIPANTS' | 'REGISTRATIONS' | 'TEAMS' | 'SUBMISSIONS' | 'ASSIGNMENTS'
-  | 'SCORES' | 'RESULTS' | 'AUDIT' | 'JUDGES' | 'VOTES' | 'COMMENTS' | 'ANOMALIES' | 'WEBHOOKS';
+/**
+ * What can be exported, as a runtime value.
+ *
+ * This was a TypeScript union, which is erased at runtime - so there was nothing
+ * the route, the manifest, the console or a test could read. Each of those then
+ * spelled out its own copy of the list, and the database's CHECK constraint
+ * spelled out a fifth, narrower one. The result: six of thirteen advertised
+ * exports built their CSV, failed the CHECK while recording the job, and returned
+ * HTTP 500, with no test ever asking for a positive export.
+ *
+ * A value fixes that, because the type is now derived from it rather than
+ * restated beside it. `ExportKind` is `typeof EXPORT_KINDS[number]`, so a kind
+ * added here is immediately valid in the route, the manifest and the service, and
+ * the drift test in `capability-coverage.test.ts` fails if the database disagrees.
+ */
+export const EXPORT_KINDS = [
+  'PARTICIPANTS',
+  'REGISTRATIONS',
+  'TEAMS',
+  'SUBMISSIONS',
+  'ASSIGNMENTS',
+  'SCORES',
+  'RESULTS',
+  'AUDIT',
+  'JUDGES',
+  'VOTES',
+  'COMMENTS',
+  'ANOMALIES',
+  'WEBHOOKS',
+] as const;
 
-export type ImportKind = 'PARTICIPANTS' | 'JUDGES' | 'TEAMS' | 'SUBMISSIONS';
+export type ExportKind = (typeof EXPORT_KINDS)[number];
+
+/**
+ * What can be imported. `SUBMISSIONS` was in this union and in the database
+ * CHECK for a long time with no route behind it, which is a declared capability
+ * that does not exist; the importer now exists, and the drift test exercises
+ * every kind rather than trusting the list.
+ */
+export const IMPORT_KINDS = ['PARTICIPANTS', 'JUDGES', 'TEAMS', 'SUBMISSIONS'] as const;
+
+export type ImportKind = (typeof IMPORT_KINDS)[number];
 
 export class TransferService {
   private readonly db: Services['db'];
@@ -287,10 +324,14 @@ export class TransferService {
   exportManifest(eventId: string, ctx: ActorContext) {
     const actor = requireActor(ctx);
     this.events.assertOrganizer(actor, this.events.require(eventId), ctx);
-    const kinds: ExportKind[] = [
-      'REGISTRATIONS', 'TEAMS', 'SUBMISSIONS', 'JUDGES', 'ASSIGNMENTS', 'SCORES',
-      'RESULTS', 'VOTES', 'COMMENTS', 'ANOMALIES', 'WEBHOOKS', 'AUDIT',
-    ];
+    /*
+     * Derived from `EXPORT_KINDS` rather than restated. This list had drifted
+     * twice: it omitted `PARTICIPANTS` entirely, so the manifest an organizer
+     * reads before a bulk export did not mention a kind they can perfectly well
+     * download. A fourth copy of a list that has three other copies is how that
+     * happens.
+     */
+    const kinds: ExportKind[] = [...EXPORT_KINDS];
     return {
       event: { id: eventId, name: this.events.require(eventId).name, slug: this.events.require(eventId).slug },
       generatedAt: ctx.at,
@@ -613,6 +654,181 @@ export class TransferService {
    */
   importParticipants(eventId: string, csv: string, options: { dryRun?: boolean; createAccounts?: boolean }, ctx: ActorContext) {
     return this.registrations.importCsv(eventId, csv, options, ctx);
+  }
+
+  /**
+   * Submissions, by CSV.
+   *
+   * `SUBMISSIONS` was in the import kind union and in the database's CHECK for a
+   * long time with no route and no method behind it - a declared capability that
+   * did not exist, which is worse than an absent one because the type said it was
+   * there. A bulk import of projects is the one a hackathon actually needs on the
+   * morning of judging, so it exists now.
+   *
+   * Imported projects land as `SUBMITTED`, not `DRAFT`, and the row is matched on
+   * the team email rather than created: an import is a record of what a team says
+   * it built, made by an organizer on their behalf, and it has to be in the
+   * contest rather than sitting in a draft nobody will open. `dryRun` defaults to
+   * true, as with every other importer, so the first run a volunteer organizer
+   * does is a rehearsal.
+   */
+  importSubmissions(
+    eventId: string,
+    csv: string,
+    options: { dryRun?: boolean },
+    ctx: ActorContext,
+  ): { total: number; applied: number; rejected: number; issues: { row: number; column: string | null; message: string; value: string | null }[] } {
+    const actor = requireActor(ctx);
+    this.events.assertOrganizer(actor, this.events.require(eventId), ctx);
+    const dryRun = options.dryRun !== false;
+
+    const parsed = parseCsv(csv, { maxColumns: 30 });
+    if (parsed.header.length === 0) throw errors.badRequest('That CSV file has no header row.');
+    const { objects } = rowsToObjects(parsed);
+    const issues: { row: number; column: string | null; message: string; value: string | null }[] = [];
+
+    const result = importRows<{
+      team_email: string;
+      project_name: string;
+      short_description: string;
+      full_description: string;
+      problem: string;
+      solution: string;
+      technologies: string[];
+      repository_url: string;
+      demo_url: string;
+      documentation_url: string;
+    }>(objects, {
+      fields: {
+        team_email: (raw) => {
+          if (raw === '') return { error: 'team_email is required' };
+          try {
+            return validateEmail(raw);
+          } catch (error) {
+            return { error: error instanceof Error ? error.message : 'invalid email' };
+          }
+        },
+        project_name: (raw) => {
+          if (raw === '') return { error: 'project_name is required' };
+          return validatePlainText(raw, { field: 'project_name', max: 160 });
+        },
+        short_description: (raw) => validatePlainText(raw, { field: 'short_description', max: 400 }),
+        full_description: (raw) => validatePlainText(raw, { field: 'full_description', max: 20_000 }),
+        problem: (raw) => validatePlainText(raw, { field: 'problem', max: 10_000 }),
+        solution: (raw) => validatePlainText(raw, { field: 'solution', max: 10_000 }),
+        technologies: (raw) => raw.split(';').map((s) => s.trim()).filter(Boolean),
+        repository_url: (raw) => this.optionalUrl(raw),
+        demo_url: (raw) => this.optionalUrl(raw),
+        documentation_url: (raw) => this.optionalUrl(raw),      },
+      onIssue: (issue) => issues.push(issue),
+    });
+
+    let applied = 0;
+    if (!dryRun) {
+      for (const row of result.rows) {
+        const value = row.value;
+        const captain = this.auth.findByEmail(value.team_email as string);
+        if (captain === null) {
+          issues.push({ row: row.row, column: 'team_email', message: 'no account with this email', value: value.team_email as string });
+          continue;
+        }
+        const team = this.db.get<{ id: string }>(
+          'SELECT t.id FROM teams t JOIN team_members tm ON tm.team_id = t.id WHERE t.event_id = :e AND tm.user_id = :u LIMIT 1',
+          { e: eventId, u: captain.id },
+        );
+        if (team === null) {
+          issues.push({ row: row.row, column: 'team_email', message: 'that account is not on a team in this event', value: value.team_email as string });
+          continue;
+        }
+
+        const projectName = value.project_name as string;
+        const slug = this.uniqueSubmissionSlug(eventId, slugify(projectName));
+        const submissionId = newId('submission');
+        this.db.transaction(() => {
+          this.db.exec(
+            `INSERT INTO submissions (
+               id, event_id, team_id, created_by, slug, project_name, short_description,
+               full_description, problem, solution, technologies, repository_url, demo_url,
+               documentation_url, state, current_version, gallery_visible, eligible_for_prizes,
+               created_at, updated_at, submitted_at
+             ) VALUES (
+               :id, :e, :t, :by, :slug, :name, :short,
+               :full, :problem, :solution, :tech, :repo, :demo,
+               :docs, 'SUBMITTED', 1, 1, 1,
+               :at, :at, :at
+             )`,
+            {
+              id: submissionId,
+              e: eventId,
+              t: team.id,
+              by: captain.id,
+              slug,
+              name: projectName,
+              short: (value.short_description as string) ?? '',
+              full: (value.full_description as string) ?? '',
+              problem: (value.problem as string) ?? '',
+              solution: (value.solution as string) ?? '',
+              tech: JSON.stringify(value.technologies as string[]),
+              repo: value.repository_url,
+              demo: value.demo_url,
+              docs: value.documentation_url,
+              at: ctx.at,
+            },
+          );
+          // A version row, so the submission has the same history every other
+          // project does. A bulk import that produced projects with no version
+          // record would be the one thing in the schema with no provenance.
+          this.db.exec(
+            `INSERT INTO submission_versions (id, submission_id, version, state, snapshot, changed_fields, checksum, note, is_final, created_at)
+             VALUES (:id, :s, 1, 'SUBMITTED', :snapshot, '[]', :sum, 'imported by the organizer', 0, :at)`,
+            {
+              id: newId('submissionVersion'),
+              s: submissionId,
+              snapshot: JSON.stringify({ projectName, imported: true }),
+              sum: contentDigest(`${String(submissionId)}:1`),
+              at: ctx.at,
+            },
+          );
+        });
+        applied += 1;
+      }
+    }
+
+    this.audit.record({
+      action: 'import.executed',
+      actorId: actor.id,
+      actorRoles: actor.roles,
+      eventId,
+      resourceType: 'importJob',
+      requestId: ctx.requestId,
+      metadata: { kind: 'SUBMISSIONS', total: objects.length, applied, rejected: issues.length, dryRun },
+      at: ctx.at,
+    });
+
+    return { total: objects.length, applied, rejected: issues.length, issues };
+  }
+
+  /**
+   * An optional URL column. Returns the same shape `importRows` expects for a
+   * field: the value, or an error for that row. Empty is not an error - a
+   * project with no demo is a perfectly ordinary project.
+   */
+  private optionalUrl(raw: string): string | { error: string } {
+    if (raw === '') return '';
+    const result = validateHttpUrl(raw, { allowPrivateHosts: true });
+    return result.valid ? result.url : { error: result.reason };
+  }
+
+  private uniqueSubmissionSlug(eventId: string, base: string): string {
+    let candidate = base || 'project';
+    let suffix = 1;
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      const clash = this.db.get<{ id: string }>('SELECT id FROM submissions WHERE event_id = :e AND slug = :s', { e: eventId, s: candidate });
+      if (clash === null) return candidate;
+      suffix += 1;
+      candidate = `${base}-${String(suffix)}`;
+    }
+    throw errors.conflict('Could not derive a unique project slug.');
   }
 
   private uniqueSlug(eventId: string, base: string): string {

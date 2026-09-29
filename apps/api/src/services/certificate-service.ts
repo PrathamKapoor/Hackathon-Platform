@@ -43,6 +43,30 @@ export type CertificateRow = {
 
 export const CERTIFICATE_VERSION = '1.0.0';
 
+/**
+ * A judge's participation record, as stored.
+ *
+ * `detail` is the per-project breakdown the hash covers, so it is part of the
+ * record rather than a rendering of it: changing a project name inside it would
+ * change the recomputed hash and the record would verify as tampered. That is
+ * the point of hashing the detail and not only the totals.
+ */
+export type ParticipationRecordRow = {
+  id: string;
+  event_id: string;
+  judge_id: string;
+  assignment_version: number;
+  reference: string;
+  judging_opens_at: string;
+  judging_closes_at: string;
+  assigned_count: number;
+  completed_count: number;
+  completion_status: string;
+  detail: string;
+  integrity_hash: string;
+  issued_at: string;
+};
+
 export class CertificateService {
   private readonly db: Services['db'];
   private readonly audit: Services['audit'];
@@ -385,8 +409,113 @@ export class CertificateService {
     };
   }
 
-  revoke(eventId: string, certificateId: string, reason: string, ctx: ActorContext): void {
-    const actor = requireActor(ctx);
+  /* ------------------------------------------ participation records */
+
+  /** Every record for an event. Organizer-scoped; see `findParticipationForUser`. */
+  listParticipation(eventId: string) {
+    return this.db.all<ParticipationRecordRow>(
+      `SELECT r.id, r.event_id AS eventId, r.reference, r.judge_id AS judgeId,
+              u.display_name AS judgeName, r.assignment_version AS assignmentVersion,
+              r.assigned_count AS assignedCount, r.completed_count AS completedCount,
+              r.completion_status AS completionStatus, r.integrity_hash AS integrityHash,
+              r.issued_at AS issuedAt
+         FROM judge_participation_records r
+         JOIN judges j ON j.id = r.judge_id
+         JOIN users u ON u.id = j.user_id
+        WHERE r.event_id = :e
+        ORDER BY u.display_name`,
+      { e: eventId },
+    );
+  }
+
+  findParticipationByReference(reference: string): ParticipationRecordRow | null {
+    return this.db.get<ParticipationRecordRow>(
+      'SELECT * FROM judge_participation_records WHERE reference = :r',
+      { r: reference.trim().toUpperCase() },
+    );
+  }
+
+  /**
+   * The records belonging to one person.
+   *
+   * This is the grant `rbac.ts` has always given - `participationRecord: 'OWN'`
+   * to both PARTICIPANT and JUDGE - with no route behind it. A judge who spent a
+   * weekend scoring somebody else's hackathon had no way to get the record of
+   * having done it, short of asking the organizer to email it, and the organizer
+   * console is not somewhere a judge can see. A grant nobody can exercise is not
+   * a grant.
+   */
+  findParticipationForUser(userId: string): ParticipationRecordRow[] {
+    return this.db.all<ParticipationRecordRow>(
+      `SELECT r.* FROM judge_participation_records r
+         JOIN judges j ON j.id = r.judge_id
+        WHERE j.user_id = :u
+        ORDER BY r.issued_at DESC`,
+      { u: userId },
+    );
+  }
+
+  /**
+   * The public verification view for a participation record.
+   *
+   * The record's hash covers its own contents, so anyone holding the record can
+   * recompute it and check it without trusting the database it came from - which
+   * is what "publicly verifiable" has to mean here. It is a content hash, not a
+   * signature: there is no private key in this system and no asymmetric signing
+   * anywhere, so what this proves is that the record has not been altered since
+   * it was issued, and not that a particular deployment issued it. Saying so
+   * plainly is better than implying a signature exists.
+   */
+  verifyParticipation(reference: string) {
+    const row = this.findParticipationByReference(reference);
+    if (row === null) {
+      return {
+        valid: false,
+        status: 'NOT_FOUND' as const,
+        message: 'No participation record exists with that reference.',
+      };
+    }
+
+    const detail = JSON.parse(row.detail) as { assignedProjects?: unknown };
+    const recomputed = sha256Hex(
+      canonicalJson({
+        eventId: row.event_id,
+        judgeId: row.judge_id,
+        assigned: row.assigned_count,
+        completed: row.completed_count,
+        opensAt: row.judging_opens_at,
+        closesAt: row.judging_closes_at,
+        detail,
+      }),
+    );
+    const valid = recomputed === row.integrity_hash;
+    const event = this.events.findById(row.event_id);
+    const judge = this.db.get<{ display_name: string }>(
+      'SELECT u.display_name FROM judges j JOIN users u ON u.id = j.user_id WHERE j.id = :j',
+      { j: row.judge_id },
+    );
+
+    return {
+      valid,
+      status: valid ? ('VALID' as const) : ('TAMPERED' as const),
+      reference: row.reference,
+      event: event ? { name: event.name, slug: event.slug } : null,
+      judgeName: judge?.display_name ?? null,
+      assignedProjects: row.assigned_count,
+      completedProjects: row.completed_count,
+      completionStatus: row.completion_status,
+      judgingWindow: { opensAt: row.judging_opens_at, closesAt: row.judging_closes_at },
+      issuedAt: row.issued_at,
+      integrityHash: row.integrity_hash,
+      recomputedHash: recomputed,
+      detail,
+      message: valid
+        ? 'This record was issued by Verdict and its contents match its recorded hash. It attests that the named person sat on this panel and completed the stated number of reviews; it is not a cryptographic signature, so it proves the record is unaltered rather than which deployment issued it.'
+        : 'The stored contents do not match the recorded hash. Do not rely on this record.',
+    };
+  }
+
+  revoke(eventId: string, certificateId: string, reason: string, ctx: ActorContext): void {    const actor = requireActor(ctx);
     this.events.assertOrganizer(actor, this.events.require(eventId), ctx);
     const row = this.db.get<CertificateRow>('SELECT * FROM certificates WHERE id = :id AND event_id = :e', { id: certificateId, e: eventId });
     if (row === null) throw errors.notFound('Certificate', certificateId);

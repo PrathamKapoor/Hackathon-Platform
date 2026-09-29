@@ -17,6 +17,7 @@ import { errors } from '../lib/errors.ts';
 import { canManageEvent, describeMatrix } from '../lib/rbac.ts';
 import { normalisePaging, requirePermission, sendCsv, sendJson, type RouteRegistry } from './context.ts';
 import { actorContext } from '../services/context.ts';
+import { EXPORT_KINDS } from '../services/transfer-service.ts';
 import { serializeEvent, serializeProject, serializePublicUser, serializeSelf, safeArray } from './serializers.ts';
 
 const Id = z.string().min(3).max(64);
@@ -1120,13 +1121,14 @@ export function registerResultRoutes(app: FastifyInstance, services: Services, r
     const params = z.object({ eventId: Id, snapshotId: Id }).parse(request.params);
     const eventId = eventIdOf(services, params.eventId);
     requirePermission(services, request.ctx, 'result', 'publish', { inOrganizedEvent: canManageEvent(request.ctx.actor, eventId) }, { eventId, resourceType: 'resultSnapshot', resourceId: params.snapshotId });
-    return services.results.publish(eventId, params.snapshotId, ctx(request));
+    const body = z.object({ override: z.boolean().default(false), reason: z.string().max(500).optional() }).parse(request.body ?? {});
+    return services.results.publish(eventId, params.snapshotId, { ...ctx(request), override: body.override });
   });
   registry.register({
     method: 'POST', path: '/api/events/{eventId}/results/snapshots/{snapshotId}/publish', tags: ['results'], auth: 'organizer',
     summary: 'Publish a snapshot. Reproduces it first and refuses if it does not match.',
     permission: { resource: 'result', action: 'publish' },
-    description: 'Publication recomputes the pipeline from the stored scores and compares against the snapshot. A mismatch returns 412 with a field-level diff and the snapshot stays unpublished.',
+    description: 'Publication recomputes the pipeline from the stored scores and compares against the snapshot. A mismatch returns 412 with a field-level diff and the snapshot stays unpublished. Results are also held back while the community voting window is open: publishing over a live vote requires override and is written to the audit ledger.',
     errors: ['PRECONDITION_FAILED', 'CONFLICT', 'FORBIDDEN'],
   });
 
@@ -1449,7 +1451,12 @@ export function registerWebhookRoutes(app: FastifyInstance, services: Services, 
 /* ========================================================= transfer + ops */
 
 export function registerTransferRoutes(app: FastifyInstance, services: Services, registry: RouteRegistry): void {
-  const EXPORT_KINDS = ['REGISTRATIONS', 'PARTICIPANTS', 'TEAMS', 'SUBMISSIONS', 'JUDGES', 'ASSIGNMENTS', 'SCORES', 'RESULTS', 'VOTES', 'COMMENTS', 'ANOMALIES', 'WEBHOOKS', 'AUDIT'] as const;
+  /*
+   * The route used to spell out its own thirteen-item list, in a different order
+   * from the service's. Two lists that are supposed to be one list is how six of
+   * them ended up disagreeing with the database. One constant, imported from the
+   * service that implements them.
+   */
 
   app.get('/api/events/:eventId/exports/manifest', async (request) => {
     const params = z.object({ eventId: Id }).parse(request.params);
@@ -1515,6 +1522,20 @@ export function registerTransferRoutes(app: FastifyInstance, services: Services,
     return services.transfer.importTeams(eventId, body.csv, { dryRun: body.dryRun }, ctx(request));
   });
   registry.register({ method: 'POST', path: '/api/events/{eventId}/imports/teams', tags: ['imports'], auth: 'organizer', summary: 'Bulk-import teams from CSV. Dry run by default.', permission: { resource: 'import', action: 'create' } });
+
+  app.post('/api/events/:eventId/imports/submissions', async (request) => {
+    const params = z.object({ eventId: Id }).parse(request.params);
+    const eventId = eventIdOf(services, params.eventId);
+    requirePermission(services, request.ctx, 'import', 'create', { inOrganizedEvent: canManageEvent(request.ctx.actor, eventId) }, { eventId, resourceType: 'importJob' });
+    const body = CsvBody.parse(request.body);
+    return services.transfer.importSubmissions(eventId, body.csv, { dryRun: body.dryRun }, ctx(request));
+  });
+  registry.register({
+    method: 'POST', path: '/api/events/{eventId}/imports/submissions', tags: ['imports'], auth: 'organizer',
+    summary: 'Bulk-import projects from CSV. Dry run by default.',
+    permission: { resource: 'import', action: 'create' },
+    description: 'Rows are matched to an existing team by the captain\'s email, and land as SUBMITTED so they are in the contest rather than in a draft nobody will open. A row naming an account that is not on a team in this event is rejected with its row number and reason.',
+  });
 }
 
 export function registerOpsRoutes(app: FastifyInstance, services: Services, registry: RouteRegistry): void {

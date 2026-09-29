@@ -1067,7 +1067,7 @@ export async function seedDemoData(db: Database, config: AppConfig): Promise<See
     at: at(122),
   });
 
-  const diagnostics = services.results.computeDiagnostics(eventId, organizerCtx);
+  const diagnostics = services.results.recordDiagnostics(eventId, organizerCtx);
 
   // The published snapshot uses RAW scoring, so the raw ranking is what the
   // public sees and the normalized ranking is available as a comparison.
@@ -1076,7 +1076,7 @@ export async function seedDemoData(db: Database, config: AppConfig): Promise<See
   const snapshot = services.results.createSnapshot(eventId, run.id, {}, organizerCtx);
   services.results.publish(eventId, snapshot.id, organizerCtx);
 
-  services.results.computeDiagnostics(eventId, organizerCtx);
+  services.results.recordDiagnostics(eventId, organizerCtx);
   services.certificates.issueForEvent(eventId, { includeJudges: true, snapshotId: snapshot.id }, organizerCtx);
 
   // A normalization comparison run, stored so the organizer screen has data.

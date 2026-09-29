@@ -109,6 +109,21 @@ const SPEC: Record<Role, Partial<Record<Action, Partial<Record<Resource, Scope>>
     delete: {
       profile: 'OWN', registration: 'OWN', team: 'OWN', submission: 'OWN',
       comment: 'OWN', session: 'OWN', upload: 'OWN',
+      /*
+       * `vote: 'OWN'` here, and its absence was a real bug.
+       *
+       * Voting is a reversible public act - a person who regrets a vote should be
+       * able to take it back, and the community service and the API
+       * documentation both say so. The `create` row above granted voting, the
+       * `delete` row did not, so the "Withdraw my vote" button on every project
+       * page returned `403 PARTICIPANT is never granted delete on vote` for
+       * everyone without a global ADMIN role. The grant existed, the route
+       * existed, the button existed, and the matrix said no.
+       *
+       * Scope is OWN, so a participant may only retract their own vote - which
+       * the handler establishes by passing the authenticated user as the owner.
+       */
+      vote: 'OWN',
     },
     export: { certificate: 'OWN', participationRecord: 'OWN' },
   },
