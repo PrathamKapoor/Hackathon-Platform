@@ -24,16 +24,25 @@ air-gapped machine. There is no cloud service to sign up for.
 ## Quick start
 
 ```bash
-cp .env.example .env
-# SESSION_SECRET is the only value with no default. Generate one:
-node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
-# paste it into .env, then:
-docker compose up --build
+git clone https://github.com/PrathamKapoor/Hackathon-Platform.git
+cd Hackathon-Platform
+docker compose up
 ```
 
-Open <http://localhost:8080>. A demo event is seeded on first boot, so there is
-something to click immediately. Every demo account shares the password
-`verdict-demo-2026`:
+That is the whole setup. No `.env` to copy, no secret to generate, no account to
+create, no external service, and no network needed once the image is built. Open
+<http://localhost:8080> — a demo event is seeded on first boot, so there is
+something to click immediately.
+
+> **The bundled `SESSION_SECRET` is for local and demo use only.** It is in
+> `docker-compose.yml` in plain text on purpose, because its entire job is to let
+> someone start a demo. **A real deployment must override it** — put a value in
+> `.env` or the environment and compose will prefer it. The application itself is
+> unchanged: `NODE_ENV=production` with a missing or short secret is still a
+> fatal boot error, so nothing here weakens production. See
+> [`docs/OPERATIONS.md`](docs/OPERATIONS.md).
+
+Every demo account shares the password `verdict-demo-2026`:
 
 | Role | Email | What it shows |
 | --- | --- | --- |
@@ -49,6 +58,12 @@ something to click immediately. Every demo account shares the password
 The judges are deliberately different from each other. Two of them are set up so
 normalization has something to do, and one leaves reviews unfinished so the
 coverage report is not a row of green ticks.
+
+To reset to a clean slate, including the demo data:
+
+```bash
+docker compose down -v && docker compose up
+```
 
 ### Without Docker
 
@@ -143,12 +158,17 @@ They run automatically on boot unless `AUTO_MIGRATE=false`.
 
 ### Configuration
 
-Every setting is an environment variable with a working default, except
-`SESSION_SECRET`. `.env.example` documents the lot. The two that will bite you
-if ignored:
+Every setting is an environment variable with a working default.
+`.env.example` documents the lot. `SESSION_SECRET` is the one the application
+refuses to invent in production — but `docker compose` supplies a demo default
+so a fresh clone starts; override it for anything real.
 
-- `SESSION_SECRET` — required in production. Rotating it signs everyone out.
+- `SESSION_SECRET` — **override the bundled demo value for any real
+  deployment.** Rotating it signs everyone out and invalidates salted vote-IP
+  hashes.
 - `SESSION_SECURE_COOKIES` — set to `true` as soon as you serve over https.
+- `AUTO_SEED` — the demo accounts share a published password. Set it to `false`
+  for a real event.
 
 ### Backups
 
@@ -285,4 +305,4 @@ all genuinely exercised. Nothing important is mocked.
 
 ## License
 
-Apache-2.0.
+[Apache-2.0](LICENSE) — the full text is in `LICENSE`.

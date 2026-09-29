@@ -1,10 +1,16 @@
 # Verdict — hackathon operations with a defensible judging engine.
 #
-#   cp .env.example .env      # then edit SESSION_SECRET
-#   docker compose up --build
+#   git clone … && cd … && docker compose up
 #
-# The service comes up on http://localhost:8080 with a seeded demo event, so
-# there is something to click on before any configuration is done.
+# That is the whole setup. No `.env`, no secret to generate, no account to
+# create: the service comes up on http://localhost:8080 with a seeded demo event
+# so there is something to click before any configuration is done.
+#
+# The bundled SESSION_SECRET below is for local and demo use only. A real
+# deployment MUST override it - see OPERATIONS.md. The application itself is
+# unchanged in production: NODE_ENV=production with a missing or short secret is
+# still a fatal boot error, and this default never reaches that check because
+# compose supplies the variable.
 
 services:
   verdict:
@@ -24,10 +30,19 @@ services:
       DATABASE_FILE: /data/verdict.db
       STORAGE_DIR: /data/uploads
       PUBLIC_URL: ${PUBLIC_URL:-http://localhost:8080}
-      SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET must be set — copy .env.example to .env and generate one}
+      # LOCAL DEMO SECRET - DO NOT USE IN PRODUCTION.
+      # 64 characters of base64url, generated once and published here on purpose:
+      # a secret in a repository is fine for a secret whose entire job is to let
+      # someone start a demo, and a disaster for any other kind. Override it by
+      # putting a real value in .env or the environment; compose prefers an
+      # environment variable over the default below.
+      SESSION_SECRET: ${SESSION_SECRET:-dogfood-local-demo-only-4Yq7vN2kZx9TbWm3PdRf8HgLcJ6Qs1EuXa5Vi0No}
       SESSION_SECURE_COOKIES: ${SESSION_SECURE_COOKIES:-false}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       LOG_PRETTY: ${LOG_PRETTY:-false}
+      # Seeds the demo dataset on first boot. Convenient for a first run and a
+      # screenshot; set to false for a real event, because it creates accounts
+      # that all share a published password.
       AUTO_MIGRATE: ${AUTO_MIGRATE:-true}
       AUTO_SEED: ${AUTO_SEED:-true}
       TRUST_PROXY: ${TRUST_PROXY:-false}
