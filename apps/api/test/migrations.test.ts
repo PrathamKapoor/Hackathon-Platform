@@ -1,4 +1,4 @@
-import test from 'node:test';
+import test, { describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdtempSync, rmSync, statSync, existsSync } from 'node:fs';
@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MIGRATIONS, runMigrations, LATEST_SCHEMA_VERSION } from '../src/db/migrations.ts';
 import { sha256Hex } from '@verdict/core/integrity';
-import { Database } from '../src/db/database.ts';
+import { Database, type Row, type Params } from '../src/db/database.ts';
 import { buildApp } from '../src/http/app.ts';
 import { loadConfig } from '../src/config.ts';
 import { createHarness, DEMO_PASSWORD } from './harness.ts';
@@ -523,4 +523,308 @@ test('the hot paths stay fast enough to be usable', { timeout: 300_000 }, async 
     `  timings: boot ${String(bootMs)}ms, gallery ${String(galleryMs)}ms, queue ${String(queueMs)}ms, ` +
       `compute ${String(computeMs)}ms, reproduce ${String(verifyMs)}ms`,
   );
+});
+
+/**
+ * The constraints added by migration 16, asserted to actually fail.
+ *
+ * A CHECK constraint that has never been shown to reject anything is a comment.
+ * Each of these drives the violation and expects the database to refuse, which
+ * is the only thing that distinguishes a constraint from a string in a DDL
+ * document.
+ */
+
+/**
+ * The constraints added by migration 16, asserted to actually fail.
+ *
+ * A CHECK constraint that has never been shown to reject anything is a comment
+ * in a DDL document. Each of these drives the violation and expects the database
+ * to refuse, which is the only thing that distinguishes a constraint from a
+ * string.
+ *
+ * The rows come from the application's own seed rather than hand-written DDL
+ * here, for two reasons: a fixture that restates the schema can drift from it
+ * without failing, and the real question is whether the constraints hold for the
+ * data the system actually produces.
+ */
+describe('migration 16: the integrity constraints can fail', () => {
+  let db: Database;
+  let dir: string;
+
+  before(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'verdict-m16-'));
+    const config = loadConfig({
+      env: 'test',
+      databaseFile: join(dir, 'm16.db'),
+      storageDir: join(dir, 'storage'),
+      logging: { level: 'error', pretty: false },
+      security: { authRateLimitMax: 10_000, rateLimitMax: 100_000 },
+    });
+    db = new Database(config.databaseFile);
+    // `Database` does not migrate on construction; the app boot path does it via
+    // buildApp. This suite is about the schema, so it does it explicitly.
+    db.migrate();
+    const { seedDemoData } = await import('../src/seed/seed.ts');
+    await seedDemoData(db, config);
+  });
+
+  after(() => {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const one = <T extends Row>(sql: string, params: Params = {}): T | null => db.get<T>(sql, params) ?? null;
+  const count = (sql: string, params: Params = {}): number => db.value<number>(sql, params) ?? 0;
+
+  const eventId = (): string => {
+    const row = one<{ id: string }>('SELECT id FROM events LIMIT 1');
+    assert.ok(row !== null, 'the seed produced no event');
+    return row.id;
+  };
+
+  test('the seeded data satisfies every constraint migration 16 adds', () => {
+    // The premise for everything below. If this fails, the migration would have
+    // failed on a real operator's database during an upgrade, and no amount of
+    // passing rejection tests would make that acceptable.
+    const orphans = count(
+      'SELECT COUNT(*) FROM certificates c WHERE c.prize_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM prizes p WHERE p.id = c.prize_id)',
+    );
+    assert.equal(orphans, 0, `${String(orphans)} certificates name a prize that does not exist`);
+
+    for (const status of db.all<{ completion_status: string }>('SELECT DISTINCT completion_status FROM judge_participation_records')) {
+      assert.ok(
+        ['NO_ASSIGNMENTS', 'COMPLETE', 'PARTIAL', 'NOT_STARTED'].includes(status.completion_status),
+        `the seed produced a completion status the new CHECK forbids: ${status.completion_status}`,
+      );
+    }
+    for (const strategy of db.all<{ strategy: string }>('SELECT DISTINCT strategy FROM judge_assignments')) {
+      assert.ok(
+        ['MANUAL', 'RANDOM', 'BALANCED', 'CONFLICT_AWARE', 'WORKLOAD_AWARE', 'PANEL_DIVERSITY'].includes(strategy.strategy),
+        `the seed produced a strategy the new CHECK forbids: ${strategy.strategy}`,
+      );
+    }
+    for (const state of db.all<{ state: string }>('SELECT DISTINCT state FROM submission_versions')) {
+      assert.ok(
+        ['DRAFT', 'SUBMITTED', 'LOCKED', 'JUDGING', 'FINALIZED'].includes(state.state),
+        `the seed produced a submission version state the new CHECK forbids: ${state.state}`,
+      );
+    }
+  });
+
+  test('a certificate cannot reference a prize that does not exist', () => {
+    // The gap. prize_id was bare TEXT, so this used to succeed and left a
+    // certificate attesting to an award nobody can look up.
+    const user = one<{ id: string }>('SELECT id FROM users LIMIT 1');
+    assert.ok(user !== null);
+    const at = new Date().toISOString();
+    assert.throws(
+      () =>
+        db.exec(
+          `INSERT INTO certificates (id, event_id, user_id, kind, reference, title, body, submission_id, prize_id, awarded_at, issued_at, integrity_hash, payload, created_at)
+           VALUES ('crt_ghost', :e, :u, 'WINNER', 'REF-GHOST', 't', '', NULL, 'prz_does_not_exist', :at, :at, 'h', '{}', :at)`,
+          { e: eventId(), u: user.id, at },
+        ),
+      /FOREIGN KEY|constraint/i,
+      'a certificate was accepted naming a prize that does not exist',
+    );
+    assert.equal(count("SELECT COUNT(*) FROM certificates WHERE id = 'crt_ghost'"), 0, 'the invalid certificate was written anyway');
+  });
+
+  test('a certificate with a real prize is kept, and losing the prize does not lose the certificate', () => {
+    // ON DELETE SET NULL, not CASCADE: withdrawing a prize must not retract
+    // proof that somebody won it.
+    const event = eventId();
+    const user = one<{ id: string }>('SELECT id FROM users LIMIT 1');
+    const at = new Date().toISOString();
+    assert.ok(user !== null, 'the seed produced no user');
+
+    db.exec(
+      `INSERT INTO prizes (id, event_id, name, description, quantity, eligible_ranks, priority, display_order, created_at, updated_at)
+       VALUES ('prz_m16', :e, 'Test Prize', 'd', 1, '[]', 100, 0, :at, :at)`,
+      { e: event, at },
+    );
+    db.exec(
+      `INSERT INTO certificates (id, event_id, user_id, kind, reference, title, body, submission_id, prize_id, awarded_at, issued_at, integrity_hash, payload, created_at)
+       VALUES ('crt_m16', :e, :u, 'WINNER', 'REF-M16', 't', '', NULL, 'prz_m16', :at, :at, 'h', '{}', :at)`,
+      { e: event, u: user.id, at },
+    );
+    assert.equal(one<{ prize_id: string }>("SELECT prize_id FROM certificates WHERE id = 'crt_m16'")?.prize_id, 'prz_m16');
+
+    db.exec("DELETE FROM prizes WHERE id = 'prz_m16'");
+    const after = one<{ prize_id: string | null }>("SELECT prize_id FROM certificates WHERE id = 'crt_m16'");
+    assert.ok(after !== null, 'deleting the prize deleted the certificate that recorded the award');
+    assert.equal(after?.prize_id, null, 'the dangling prize reference was not cleared');
+  });
+
+  test('an assignment strategy outside the declared set is refused', () => {
+    const event = eventId();
+    const user = one<{ id: string }>('SELECT id FROM users LIMIT 1');
+    const judge = one<{ id: string }>('SELECT id FROM judges LIMIT 1');
+    const submission = one<{ id: string }>('SELECT id FROM submissions LIMIT 1');
+    const at = new Date().toISOString();
+    assert.ok(user !== null && judge !== null && submission !== null, 'the seed is missing a row this test needs');
+
+    // A misspelling that used to be accepted, and would read back as a real
+    // strategy in every report that groups assignments by strategy.
+    assert.throws(
+      () =>
+        db.exec(
+          `INSERT INTO judge_assignments (id, event_id, judge_id, submission_id, version, status, strategy, reason, soft_conflict, assigned_at, created_at, updated_at)
+           VALUES ('asg_typo', :e, :j, :s, 1, 'ASSIGNED', 'BALNCED', '', 0, :at, :at, :at)`,
+          { e: event, j: judge?.id, s: submission?.id, at },
+        ),
+      /CHECK|constraint/i,
+      'a misspelled assignment strategy was accepted',
+    );
+
+    // And the real ones still are, including MANUAL, which is the default for a
+    // human-made assignment and the one value outside ASSIGNMENT_STRATEGIES.
+    // `UNIQUE (judge_id, submission_id)` permits one row per pair ever, so each
+    // strategy needs its own project - the seed already used the first one.
+    // Fresh projects, because the seed's own submissions are already assigned to
+    // this judge and UNIQUE (judge_id, submission_id) allows one row per pair.
+    for (let i = 0; i < 7; i += 1) {
+      db.exec(
+        `INSERT INTO submissions (id, event_id, team_id, track_id, created_by, slug, project_name, short_description, state, created_at, updated_at, submitted_at)
+         VALUES (:id, :e, NULL, NULL, :cb, :sl, :n, 'for the strategy test', 'SUBMITTED', :at, :at, :at)`,
+        {
+          id: 'sub_m16_' + String(i),
+          e: event,
+          n: 'Strategy Project ' + String(i),
+          sl: 'strategy-project-' + String(i),
+          cb: user.id,
+          at,
+        },
+      );
+    }
+    const spare = db
+      .all<{ id: string }>("SELECT id FROM submissions WHERE id LIKE 'sub_m16_%' ORDER BY id")
+      .map((row) => row.id);
+    assert.equal(spare.length, 7, 'the fixture projects were not created');
+    const strategies = ['MANUAL', 'RANDOM', 'BALANCED', 'CONFLICT_AWARE', 'WORKLOAD_AWARE', 'PANEL_DIVERSITY'];
+    for (const [i, strategy] of strategies.entries()) {
+      db.exec(
+        `INSERT INTO judge_assignments (id, event_id, judge_id, submission_id, version, status, strategy, reason, soft_conflict, assigned_at, created_at, updated_at)
+         VALUES (:id, :e, :j, :s, 99, 'ASSIGNED', :st, '', 0, :at, :at, :at)`,
+        { id: 'asg_ok_' + String(i), e: event, j: judge.id, s: spare[i]!, st: strategy, at },
+      );
+    }
+    assert.equal(count("SELECT COUNT(*) FROM judge_assignments WHERE strategy = 'MANUAL'") > 0, true, 'MANUAL was not accepted');
+  });
+
+  test('a participation record cannot attest to a status nobody recognises', () => {
+    // The completion status is what a third party verifies against the content
+    // hash. An unconstrained value there means a record can attest to something
+    // no other implementation of this system would understand, and still verify.
+    const event = eventId();
+    const judge = one<{ id: string }>('SELECT id FROM judges LIMIT 1');
+    const at = new Date().toISOString();
+    assert.ok(judge !== null);
+    // The unique key is (event, judge, assignment_version), so each status needs
+    // its own version as well as its own row.
+    const record = (status: string, id: string, version: number) =>
+      db.exec(
+        `INSERT INTO judge_participation_records (id, event_id, judge_id, assignment_version, reference, judging_opens_at, judging_closes_at, assigned_count, completed_count, completion_status, detail, integrity_hash, issued_at)
+         VALUES (:id, :e, :j, :v, :ref, :at, :at, 3, 3, :s, '{}', 'h', :at)`,
+        { id, e: event, j: judge.id, v: version, ref: 'JPR-' + id, s: status, at },
+      );
+
+    const statuses = ['NO_ASSIGNMENTS', 'COMPLETE', 'PARTIAL', 'NOT_STARTED'];
+    for (const [i, status] of statuses.entries()) {
+      record(status, 'ok_' + status, 90 + i);
+    }
+    assert.throws(() => record('ALMOST_DONE', 'typo', 99), /CHECK|constraint/i, 'a participation record attested to an undefined completion status');
+  });
+
+  test('the participation record is still idempotent after the rebuild', () => {
+    // The rebuild dropped and recreated the unique index. Had it not been
+    // recreated, two records for the same judge and version would both succeed -
+    // the exact thing migration 14 fixed.
+    const judge = one<{ id: string }>('SELECT id FROM judges LIMIT 1');
+    assert.ok(judge !== null);
+    const at = new Date().toISOString();
+    // Version 80 is used by nothing else, so the first insert succeeds and the second collides.
+    db.exec(
+      `INSERT INTO judge_participation_records (id, event_id, judge_id, assignment_version, reference, judging_opens_at, judging_closes_at, assigned_count, completed_count, completion_status, detail, integrity_hash, issued_at)
+       VALUES ('dupe_first', :e, :j, 80, 'JPR-DUPE-FIRST', :at, :at, 1, 1, 'COMPLETE', '{}', 'h', :at)`,
+      { e: eventId(), j: judge.id, at },
+    );
+    assert.throws(
+      () =>
+        db.exec(
+          `INSERT INTO judge_participation_records (id, event_id, judge_id, assignment_version, reference, judging_opens_at, judging_closes_at, assigned_count, completed_count, completion_status, detail, integrity_hash, issued_at)
+           VALUES ('dupe_second', :e, :j, 80, 'JPR-DUPE-SECOND', :at, :at, 1, 1, 'COMPLETE', '{}', 'h', :at)`,
+          { e: eventId(), j: judge.id, at },
+        ),
+      /UNIQUE|constraint/i,
+      'a duplicate participation record was accepted, so the rebuilt unique index was not recreated',
+    );
+  });
+
+  test('a submission version state outside the declared set is refused', () => {
+    const submission = one<{ id: string }>('SELECT id FROM submissions LIMIT 1');
+    const user = one<{ id: string }>('SELECT id FROM users LIMIT 1');
+    const at = new Date().toISOString();
+    assert.ok(submission !== null && user !== null);
+    // `UNIQUE (submission_id, version)`, so each state needs its own version.
+    const version = (state: string, id: string, n: number) =>
+      db.exec(
+        `INSERT INTO submission_versions (id, submission_id, version, author_id, state, changed_fields, snapshot, checksum, is_final, note, created_at)
+         VALUES (:id, :s, :v, :u, :st, '[]', '{}', 'ck', 0, '', :at)`,
+        { id, s: submission.id, v: n, u: user.id, st: state, at },
+      );
+
+    const states = ['DRAFT', 'SUBMITTED', 'LOCKED', 'JUDGING', 'FINALIZED'];
+    for (const [i, state] of states.entries()) {
+      version(state, 'v_' + state, 90 + i);
+    }
+    assert.throws(() => version('FINISHED', 'v_typo', 99), /CHECK|constraint/i, 'an undeclared submission version state was accepted');
+  });
+
+  test('the final-version immutability triggers survived the table rebuild', () => {
+    // Dropping a table drops its triggers. Migration 16 rebuilds
+    // submission_versions, so this is the check that the evidence chain was
+    // recreated rather than quietly lost.
+    assert.throws(
+      () => db.exec("UPDATE submission_versions SET note = 'edited' WHERE is_final = 1 AND id = (SELECT id FROM submission_versions WHERE is_final = 1 LIMIT 1)"),
+      /immutable/i,
+      'a final submission version was edited, so the immutability trigger was lost in the rebuild',
+    );
+    assert.throws(
+      () => db.exec('DELETE FROM submission_versions WHERE is_final = 1'),
+      /cannot be deleted/i,
+      'a final submission version was deleted, so the immutability trigger was lost in the rebuild',
+    );
+  });
+
+  test('the two new foreign-key indexes exist and are used', () => {
+    // Not merely present: a query planner that ignores the index is exactly the
+    // original complaint.
+    for (const table of ['scores', 'criterion_scores']) {
+      const plan = db.all<{ detail: string }>(`EXPLAIN QUERY PLAN SELECT COUNT(*) FROM ${table} WHERE rubric_version_id = 'rv_x'`);
+      const detail = plan.map((row) => String(row.detail)).join(' | ');
+      assert.ok(
+        /USING (INDEX|COVERING INDEX)/i.test(detail) && /rubric/i.test(detail),
+        `a query filtering ${table}.rubric_version_id does not use an index: ${detail}`,
+      );
+    }
+  });
+
+  test('the immutability triggers on the untouched result tables are still present', () => {
+    // Migration 16 deliberately left result_entries and result_run_entries alone.
+    // This confirms that was a decision about foreign keys, not an accident that
+    // dropped their triggers.
+    const triggers = db.all<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'trigger'");
+    const names = triggers.map((t) => t.name);
+    for (const expected of [
+      'result_run_entries_no_update',
+      'result_entries_published_no_update',
+      'result_entries_published_no_delete',
+      'audit_events_no_delete',
+      'scores_locked_no_update',
+      'criterion_scores_locked_no_update',
+    ]) {
+      assert.ok(names.includes(expected), `the trigger ${expected} is missing`);
+    }
+  });
 });

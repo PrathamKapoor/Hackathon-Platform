@@ -1,0 +1,19 @@
+# Port override for the deployment verification.
+#
+# Something else on the host may already own 8080 - a leftover dev server, or
+# anything else. The deployment contract is not "port 8080 is free", it is "the
+# image builds, the stack starts with no .env, migrations run, the data survives
+# a restart", and none of that depends on which host port the port mapping lands
+# on. So when 8080 is occupied the verification moves rather than demanding the
+# port be freed.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.test.yml -f docker-compose.altport.yml up -d
+services:
+  verdict:
+    ports:
+      - mode: ingress
+        target: 8080
+        published: "8081"
+        protocol: tcp
+    environment:
+      PUBLIC_URL: http://localhost:8081

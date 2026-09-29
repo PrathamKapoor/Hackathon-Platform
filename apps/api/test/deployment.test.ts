@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
+import { LATEST_SCHEMA_VERSION } from '../src/db/migrations.ts';
 import { parse as parseYaml } from 'yaml';
 
 /**
@@ -285,9 +286,12 @@ test('the image builds, the stack starts with no .env, and the data survives a r
     return;
   }
 
+  const composeFiles = process.env.DEPLOYMENT_BASE_URL === undefined ? 2 : 3;
+  const composeArgs = (args: string[]): string[] =>
+    composeFiles === 3 ? ['-f', 'docker-compose.yml', '-f', 'docker-compose.test.yml', '-f', 'docker-compose.altport.yml', ...args] : ['-f', 'docker-compose.yml', '-f', 'docker-compose.test.yml', ...args];
   const compose = async (args: string[]): Promise<{ code: number; out: string }> => {
     return await new Promise((resolve) => {
-      const child = spawn('docker', ['compose', ...args], { cwd: ROOT, shell: true });
+      const child = spawn('docker', ['compose', ...composeArgs(args)], { cwd: ROOT, shell: true });
       let out = '';
       child.stdout.on('data', (chunk: Buffer) => { out += String(chunk); });
       child.stderr.on('data', (chunk: Buffer) => { out += String(chunk); });
@@ -315,8 +319,13 @@ test('the image builds, the stack starts with no .env, and the data survives a r
     await compose(['-f', 'docker-compose.yml', '-f', 'docker-compose.test.yml', 'down', '-v']);
   });
 
+  // The published port is not the contract, so it is overridable. A leftover dev
+  // server holding 127.0.0.1:8080 will otherwise answer the readiness poll with
+  // something that is not this platform, and the test fails for a reason that
+  // has nothing to do with the image.
+  const base = process.env.DEPLOYMENT_BASE_URL ?? 'http://localhost:8080';
+
   // Readiness, by polling the endpoint the healthcheck actually probes.
-  const base = 'http://localhost:8080';
   let ready = false;
   for (let attempt = 0; attempt < 60; attempt += 1) {
     try {
@@ -324,7 +333,11 @@ test('the image builds, the stack starts with no .env, and the data survives a r
       if (response.ok) {
         const body = (await response.json()) as { status?: string; schemaVersion?: number };
         assert.equal(body.status, 'ready', `/api/ready said ${String(body.status)}`);
-        assert.equal(body.schemaVersion, 15, 'the container is not on the current schema version');
+        assert.equal(
+          body.schemaVersion,
+          LATEST_SCHEMA_VERSION,
+          `the container is on schema ${String(body.schemaVersion)} and the repository is on ${String(LATEST_SCHEMA_VERSION)}`,
+        );
         ready = true;
         break;
       }
@@ -333,7 +346,15 @@ test('the image builds, the stack starts with no .env, and the data survives a r
     }
     await new Promise((resolve) => setTimeout(resolve, 2000));
   }
-  assert.ok(ready, `the container never became ready within 120s (${docker.reason})`);
+  assert.ok(ready, `the container never became ready on ${base} within 120s (${docker.reason})`);
+
+  // Guard against the failure this whole block exists to prevent: something that
+  // is not Verdict answering on the port we were told to check.
+  const identity = await (await fetch(`${base}/api/capabilities`)).json() as { judging?: unknown };
+  assert.ok(
+    identity.judging !== undefined,
+    `${base} answered /api/ready with something that is not this platform, so this run proves nothing. Set DEPLOYMENT_BASE_URL to a free port.`,
+  );
 
   // A seeded event, since a working platform is a seeded one.
   const events = (await (await fetch(`${base}/api/events`)).json()) as { data?: { id: string }[] };

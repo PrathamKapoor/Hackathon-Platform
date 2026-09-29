@@ -29,7 +29,7 @@ Everything here was run, and the counts are what the commands actually printed.
 | Command | Result |
 | --- | --- |
 | `npm run typecheck` | Pass. Both projects: core/api/tests/scripts, then the web app. |
-| `npm test` | **461 passed**, 0 failed, 70 suites. Includes the deployment test that builds the image and starts the stack when Docker is present. |
+| `npm test` | **471 passed**, 0 failed, 70 suites. Includes the deployment test that builds the image and starts the stack when Docker is present. |
 | `npm run build` | Pass. 505.46 kB JS, 146.44 kB gzipped, 16.66 kB CSS. |
 | `npm run test:e2e` | **50 passed**, 0 failed, 8 suites, real Chrome against the built bundle. |
 | `npm run acceptance` | **35 of 35 checks passed.** |
@@ -44,7 +44,7 @@ Everything here was run, and the counts are what the commands actually printed.
 | `docker compose down -v && up -d` | Volume removed, database rebuilt from migrations, re-seeded. |
 | Multi-viewport browser check | 4 viewports × 10 surfaces, in both browser runs. |
 | Clean-database migration + seed | Every test harness, plus a fresh volume in the container. |
-| Old-schema upgrade (v11 → v15) | Covered by `migrations.test.ts`. |
+| Old-schema upgrade (v11 -> v16) | Covered by `migrations.test.ts`. |
 | Backup and restore round trip | Covered by `migrations.test.ts`. |
 
 Measured on the seeded demo — 12 projects, 12 teams, 36 assignments, 24 users,
@@ -133,6 +133,37 @@ served from `/assets/`.
 **And it found a real defect.** See defect 31 below: the public result
 verification route could not verify any real result.
 
+### Migration 16: the integrity constraints
+
+Four of the eight documented gaps are closed. Each was checked against the seeded
+dataset *before* the migration was written - zero rows on any affected table
+violate any constraint added, so the rebuilds are copies rather than repairs - and
+each is proven to reject a violation by a test that drives it.
+
+- `certificates.prize_id` is now a foreign key, `ON DELETE SET NULL` so that
+  withdrawing a prize does not retract the proof somebody won it.
+- CHECK constraints on `judge_assignments.strategy`,
+  `judge_participation_records.completion_status` and `submission_versions.state`,
+  each value set taken from the constant the application itself uses. The
+  completion status matters most of the three: it is what a third party verifies
+  against the record's content hash, so an unconstrained value there meant a
+  record could attest to a status no other implementation would recognise, and
+  still verify.
+- Indexes on `scores.rubric_version_id` and `criterion_scores.rubric_version_id`,
+  asserted through `EXPLAIN QUERY PLAN` rather than merely present, because an
+  index the planner ignores was the original complaint.
+- The rebuild of `submission_versions` recreated its two immutability triggers
+  verbatim, and `judge_participation_records` its unique idempotency index. Both
+  are asserted, because a silently lost trigger is worse than the gap it
+  replaced - and the first run of the suite did catch the missing index.
+
+**One gap deliberately left open.** `result_entries.track_id` and
+`result_run_entries.track_id` look identical to the `certificates.prize_id` case
+and are not. Those tables are published immutable snapshots, and a snapshot's
+job is to record what was true when it was taken. A foreign key would mean
+deleting a track could not remove the reference to it from an already-published
+result, so a historical record would break in the present tense. The reasoning is
+recorded in the migration's own comments, next to the code.
 ### A defect the air-gapped run found
 
 31. **`GET /api/results/verify/{reference}` returned 422 for every real
@@ -329,7 +360,7 @@ This is a property of the harness, not a product defect, and it is why
 | Threat model | Met | `THREAT-MODEL.md`: the general web surface, plus a section each on Sybil voting, ballot stuffing, submission scraping, judge collusion and deadline gaming. |
 | API reference | Met | `API.md`. The six documented defects in the published document are **fixed**, and the document is now checked against a live server by `openapi-truth.test.ts` on every `npm test`. |
 | Development guide | Met | `DEVELOPMENT.md`. |
-| Test suite | Met | 461 unit/integration, 50 browser, 35 acceptance. |
+| Test suite | Met | 471 unit/integration, 50 browser, 35 acceptance. |
 
 ---
 
@@ -498,7 +529,7 @@ Stated rather than hidden. None is a surprise; all are recorded in the docs.
 
 ## Release checklist
 
-- [x] `npm run verify` green: typecheck, 461 unit/integration, build, 50 browser, 35 acceptance
+- [x] `npm run verify` green: typecheck, 471 unit/integration, build, 50 browser, 35 acceptance
 - [x] OpenAPI document current, and checked against a live server on every test run
 - [x] Result pipeline deterministic and reproducible, verified from stored reviews
 - [x] Published results immutable, corrections supersede rather than rewrite
@@ -508,7 +539,7 @@ Stated rather than hidden. None is a surprise; all are recorded in the docs.
 - [x] Voting cannot leak into the result it informs; participants may correct a vote
 - [x] Reads do not write
 - [x] Responsive and accessible at 390 / 768 / 1280 / 1440
-- [x] Migration from an older release tested with data intact (v11 → v15)
+- [x] Migration from an older release tested with data intact (v11 -> v16)
 - [x] Backup and restore tested end to end, including result reproduction
 - [x] `docker compose up` needs no `.env`; Apache-2.0 `LICENSE` present and asserted by test
 - [x] Documentation complete: architecture, judging, data model, API, threat model, development, operations

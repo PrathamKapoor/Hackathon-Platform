@@ -261,7 +261,7 @@ an operator with the file.
 
 ```bash
 npm run typecheck      # both the node and the browser project
-npm test               # 461 unit and integration tests
+npm test               # 471 unit and integration tests
 npm run test:core      # the judging engine alone
 npm run test:api       # API, security, migrations, static serving
 npm run test:e2e       # builds, then 50 browser tests

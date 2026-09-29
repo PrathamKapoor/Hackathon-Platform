@@ -1250,7 +1250,179 @@ CREATE INDEX idx_export_jobs_event ON export_jobs (event_id, created_at);
 -- declared capability with nothing behind it. Rather than leave a fourth kind
 -- the type promised and the application could not deliver, the submissions
 -- importer now exists and the declaration is true.
-`,
+    `,
+  },
+
+  {
+    version: 16,
+    name: 'integrity-constraints',
+    sql: `
+-- ------------------------------------------------- integrity constraints
+
+-- Four of the gaps listed in docs/DATA-MODEL.md, closed. Each was a real
+-- omission rather than a judgement call, and each is fixed here rather than
+-- being re-described as an accepted trade-off, because in every case the
+-- database could hold a row the application had no way of producing.
+--
+-- Verified against the seeded dataset before writing this: zero rows on any
+-- affected table violate any constraint added below, so the rebuilds are copies
+-- rather than repairs. That check is in migrations.test.ts, not only here.
+
+-- 1. certificates.prize_id was bare TEXT while prizes(id) has always existed.
+--    A certificate could name a prize that does not exist, and deleting a prize
+--    orphaned the reference with no error. ON DELETE SET NULL, because a
+--    withdrawn prize should not retroactively delete the certificate proving
+--    somebody won it.
+CREATE TABLE certificates_fk (
+  id             TEXT PRIMARY KEY,
+  event_id       TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  user_id        TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind           TEXT NOT NULL CHECK (kind IN ('PARTICIPANT','FINALIST','WINNER','JUDGE')),
+  reference      TEXT NOT NULL UNIQUE,
+  title          TEXT NOT NULL,
+  body           TEXT NOT NULL DEFAULT '',
+  submission_id  TEXT REFERENCES submissions(id) ON DELETE SET NULL,
+  prize_id       TEXT REFERENCES prizes(id) ON DELETE SET NULL,
+  awarded_at     TEXT NOT NULL,
+  issued_at      TEXT NOT NULL,
+  revoked_at     TEXT,
+  integrity_hash TEXT NOT NULL,
+  payload        TEXT NOT NULL,
+  created_at     TEXT NOT NULL,
+  UNIQUE (event_id, user_id, kind, submission_id)
+) STRICT;
+INSERT INTO certificates_fk SELECT * FROM certificates;
+DROP TABLE certificates;
+ALTER TABLE certificates_fk RENAME TO certificates;
+CREATE INDEX idx_certificates_event ON certificates (event_id, kind);
+
+-- 2. judge_assignments.strategy had no CHECK while every other status-like
+--    column in the schema has one. The permitted values are
+--    ASSIGNMENT_STRATEGIES plus 'MANUAL', which is the default for an assignment
+--    a human made rather than one the engine proposed - a distinction the
+--    schema did not record, so a typo read back as a legitimate strategy.
+CREATE TABLE judge_assignments_checked (
+  id             TEXT PRIMARY KEY,
+  event_id       TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  judge_id       TEXT NOT NULL REFERENCES judges(id) ON DELETE CASCADE,
+  submission_id  TEXT NOT NULL REFERENCES submissions(id) ON DELETE CASCADE,
+  version        INTEGER NOT NULL DEFAULT 1,
+  status         TEXT NOT NULL DEFAULT 'ASSIGNED'
+                   CHECK (status IN ('ASSIGNED','IN_PROGRESS','SUBMITTED','SKIPPED','REASSIGNED')),
+  strategy       TEXT NOT NULL DEFAULT 'MANUAL'
+                   CHECK (strategy IN ('MANUAL','RANDOM','BALANCED','CONFLICT_AWARE','WORKLOAD_AWARE','PANEL_DIVERSITY')),
+  reason         TEXT NOT NULL DEFAULT '',
+  soft_conflict  INTEGER NOT NULL DEFAULT 0,
+  override_by    TEXT REFERENCES users(id) ON DELETE SET NULL,
+  assigned_at    TEXT NOT NULL,
+  completed_at   TEXT,
+  created_at     TEXT NOT NULL,
+  updated_at     TEXT NOT NULL,
+  UNIQUE (judge_id, submission_id)
+) STRICT;
+INSERT INTO judge_assignments_checked SELECT * FROM judge_assignments;
+DROP TABLE judge_assignments;
+ALTER TABLE judge_assignments_checked RENAME TO judge_assignments;
+CREATE INDEX idx_assignments_event_version ON judge_assignments (event_id, version);
+CREATE INDEX idx_assignments_judge ON judge_assignments (judge_id, status);
+CREATE INDEX idx_assignments_submission ON judge_assignments (submission_id);
+
+-- 3. judge_participation_records.completion_status was unconstrained. This is
+--    the one that matters most of the four, because the completion status is
+--    what a participation record *attests to* - a third party verifies this
+--    string against a content hash. An unconstrained value there means a record
+--    could attest to a status that no other implementation of this system would
+--    recognise, and it would still verify. The four values are the only ones the
+--    issuing expression can produce.
+CREATE TABLE judge_participation_records_checked (
+  id                 TEXT PRIMARY KEY,
+  event_id           TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  judge_id           TEXT NOT NULL REFERENCES judges(id) ON DELETE CASCADE,
+  assignment_version INTEGER NOT NULL,
+  reference          TEXT NOT NULL UNIQUE,
+  judging_opens_at   TEXT NOT NULL,
+  judging_closes_at  TEXT NOT NULL,
+  assigned_count     INTEGER NOT NULL DEFAULT 0,
+  completed_count    INTEGER NOT NULL DEFAULT 0,
+  completion_status  TEXT NOT NULL
+                       CHECK (completion_status IN ('NO_ASSIGNMENTS','COMPLETE','PARTIAL','NOT_STARTED')),
+  detail             TEXT NOT NULL DEFAULT '{}',
+  integrity_hash     TEXT NOT NULL,
+  issued_at          TEXT NOT NULL
+) STRICT;
+INSERT INTO judge_participation_records_checked SELECT * FROM judge_participation_records;
+DROP TABLE judge_participation_records;
+ALTER TABLE judge_participation_records_checked RENAME TO judge_participation_records;
+CREATE INDEX idx_participation_event ON judge_participation_records (event_id);
+
+-- Recreated because dropping the table dropped it with it. This is the index
+-- that makes issuing a participation record idempotent, so losing it silently
+-- would let two records exist for the same judge and assignment version - the
+-- exact thing migration 14 added it to prevent.
+CREATE UNIQUE INDEX idx_participation_unique
+  ON judge_participation_records (event_id, judge_id, assignment_version);
+
+-- 4. submission_versions.state was unconstrained, on the table that is the
+--    history of what a submission looked like at each version. The triggers that
+--    make it immutable are recreated verbatim below, because dropping the table
+--    drops its triggers - and a silently lost immutability trigger is worse
+--    than the gap this migration closes.
+CREATE TABLE submission_versions_checked (
+  id             TEXT PRIMARY KEY,
+  submission_id  TEXT NOT NULL REFERENCES submissions(id) ON DELETE CASCADE,
+  version        INTEGER NOT NULL,
+  author_id      TEXT NOT NULL REFERENCES users(id),
+  state          TEXT NOT NULL
+                  CHECK (state IN ('DRAFT','SUBMITTED','LOCKED','JUDGING','FINALIZED')),
+  changed_fields TEXT NOT NULL DEFAULT '[]',
+  snapshot       TEXT NOT NULL,
+  checksum       TEXT NOT NULL,
+  is_final       INTEGER NOT NULL DEFAULT 0,
+  note           TEXT NOT NULL DEFAULT '',
+  created_at     TEXT NOT NULL,
+  UNIQUE (submission_id, version)
+) STRICT;
+INSERT INTO submission_versions_checked SELECT * FROM submission_versions;
+DROP TABLE submission_versions;
+ALTER TABLE submission_versions_checked RENAME TO submission_versions;
+CREATE INDEX idx_versions_submission ON submission_versions (submission_id, version);
+
+-- A final version's snapshot and checksum are the evidence for a submitted
+-- project, so they may be neither edited nor removed.
+CREATE TRIGGER submission_versions_final_immutable
+BEFORE UPDATE ON submission_versions
+FOR EACH ROW WHEN OLD.is_final = 1
+BEGIN
+  SELECT RAISE(ABORT, 'submission_versions: a final version is immutable');
+END;
+
+CREATE TRIGGER submission_versions_final_no_delete
+BEFORE DELETE ON submission_versions
+FOR EACH ROW WHEN OLD.is_final = 1
+BEGIN
+  SELECT RAISE(ABORT, 'submission_versions: a final version cannot be deleted');
+END;
+
+-- ---------------------------------------------------------------- indexes
+
+-- 5. Two NOT NULL foreign keys with no index, on the tables a single result
+--    recomputation walks. Without them SQLite scans, so the cost is linear in
+--    the size of the judging panel rather than logarithmic, and it grows exactly
+--    when an event is large enough for the recomputation to be worth timing.
+CREATE INDEX idx_scores_rubric_version ON scores (rubric_version_id);
+CREATE INDEX idx_criterion_scores_rubric_version ON criterion_scores (rubric_version_id);
+
+-- ---------------------------------------------------------------- not done
+
+-- result_entries.track_id and result_run_entries.track_id are bare TEXT, and
+-- deliberately left that way. It looks like the same gap as
+-- certificates.prize_id, and it is not: those tables are published, immutable
+-- snapshots, and a snapshot's job is to record what was true when it was
+-- taken. Adding a foreign key would mean deleting a track could not remove the
+-- reference to it from an already-published result - which would make a
+-- historical record break in the present tense. A dangling track id in a
+-- published snapshot is the correct behaviour; a missing one would not be.
+    `,
   },
 ];
 

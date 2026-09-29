@@ -14,7 +14,7 @@ stores, and the places where the two have come apart.
 
 | | |
 | --- | --- |
-| Migrations | 15 (schema version 15) |
+| Migrations | 16 (schema version 16) |
 | Tables | 45, **all `STRICT`** |
 | Explicit indexes | 69 (2 of them `UNIQUE`) |
 | Inline `UNIQUE` constraints | 30, giving 76 `sqlite_autoindex` entries in total |
@@ -49,6 +49,7 @@ cover.
 | 13 | `user-roles-global-scope` | rebuilds `user_roles` to support global roles properly |
 | 14 | `participation-record-uniqueness` | dedupes participation records, adds the unique index behind them |
 | 15 | `export-job-kind-csv-imports` | rebuilds `export_jobs` so the `kind` check constraint admits every CSV export and the three import kinds |
+| 16 | `integrity-constraints` | `certificates.prize_id` foreign key; CHECKs on `judge_assignments.strategy`, `judge_participation_records.completion_status` and `submission_versions.state`; two `rubric_version_id` indexes |
 
 ---
 
@@ -252,44 +253,64 @@ entry tables, `webhook_deliveries.payload`, and `certificates.payload`.
 
 ## Known integrity gaps
 
-Real, and listed so nobody discovers them in production.
+Real, and listed so nobody discovers them in production. Four are now closed;
+the rest are stated with the reasoning that makes them acceptable.
 
-1. **`certificates.prize_id` has no foreign key.** It is bare `TEXT` even though
-   `prizes(id)` exists. A certificate can name a prize that does not exist, and
-   deleting a prize orphans the reference silently. Fixing it means a new
-   migration that rebuilds the table.
+1. ~~**`certificates.prize_id` has no foreign key.**~~ **Fixed in migration 16.**
+   It is now `REFERENCES prizes(id) ON DELETE SET NULL` — SET NULL rather than
+   CASCADE, because withdrawing a prize must not retract the proof that somebody
+   won it. A test drives the violation and requires the database to refuse.
 2. **`judge_assignments` carries a round model its unique key forbids.** It has
    `version`, a `REASSIGNED` status and an index on `(event_id, version)`, all
    implying multiple rounds per (judge, submission) - but `UNIQUE (judge_id,
    submission_id)` permits exactly one row per pair, ever. `scores` mirrors the
    same constraint, so a project cannot be re-judged. If re-judging is ever
-   wanted, the unique key has to change.
+   wanted, the unique key has to change. This is left alone deliberately: it is
+   a modelling inconsistency, not a corruption the database permits silently, and
+   changing the unique key would change what a "round" means to the assignment
+   engine.
 3. **`result_entries.track_id` and `result_run_entries.track_id` are bare
-   `TEXT`**, unlike `submissions.track_id` and `teams.track_id`, which are
-   proper foreign keys. A track deleted after a result was computed leaves a
-   dangling id in the published entries.
+   `TEXT`** — and this is now a decision rather than an oversight. Those tables
+   are published, immutable snapshots, and a snapshot's job is to record what was
+   true when it was taken. Adding a foreign key would mean deleting a track could
+   not remove the reference to it from an already-published result, so a
+   historical record would break in the present tense. A dangling track id in a
+   published snapshot is correct; a missing one would not be. The migration that
+   closes gaps 1, 6 and 8 says so in its own comments, next to the code.
 4. **`judge_conflicts.subject_id` is unconstrained.** It is a polymorphic
    reference with nothing tying it to `subject_kind`; the table-level `CHECK`
    only requires that a project id *or* a subject id is present, not that they
    are consistent. `subject_kind = 'TEAM'` with a `subject_id` pointing at a user
    is representable. `anomaly_flags.subject_id` is the same shape with no
-   referential integrity at all.
+   referential integrity at all. These cannot have a foreign key by nature — a
+   column that points at one of four tables cannot reference all four — and the
+   service resolves `subject_kind` before acting, so the risk is a mislabelled
+   subject rather than a corrupt row.
 5. **`NULL` defeats two unique constraints.** In SQLite, nulls are distinct
    inside a unique index, so `uploads`' `UNIQUE (event_id, stored_name)` does not
    dedupe when `event_id` is null, and neither does
    `certificates`' `UNIQUE (event_id, user_id, kind, submission_id)` when
    `submission_id` is null - which is exactly the case the certificate service
    relies on for idempotency. It works because the service also checks
-   explicitly, not because the constraint does.
-6. **Four status-like columns have no `CHECK`**: `submission_versions.state`,
-   `judge_participation_records.completion_status`, `judge_assignments.strategy`,
-   and the `validation` columns on both entry tables. Everywhere else the
-   permitted values are declared in the schema.
+   explicitly, not because the constraint does. The proper fix is a unique
+   *index* over `COALESCE`, which SQLite supports; it was left for a later
+   migration because it is a behavioural guarantee currently provided in
+   application code, and moving it into the schema changes when the check runs.
+6. ~~**Four status-like columns have no `CHECK`.**~~ **Three of the four fixed in
+   migration 16**: `submission_versions.state`,
+   `judge_participation_records.completion_status` and
+   `judge_assignments.strategy` now declare their permitted values, each taken
+   from the constant the application itself uses, and each proven to reject a
+   bad value by a test rather than merely appearing in the DDL. The `validation`
+   columns on `result_entries` and `result_run_entries` stay unconstrained,
+   under the same reasoning as gap 3.
 7. **`PRAGMA foreign_key_check` does not fire at boot**, by the reasoning above.
-8. **No index covers `rubric_version_id` on `scores` or `criterion_scores`**, or
-   `judge_participation_records.reference` beyond its unique auto-index. All
-   three are `NOT NULL` foreign keys; the only table with a foreign key to
-   `rubric_versions` that is *not* indexed is one recomputation would scan.
+8. ~~**No index covers `rubric_version_id` on `scores` or `criterion_scores`.**~~
+   **Fixed in migration 16.** Both are indexed, and the tests assert that a query
+   filtering either column actually *uses* the index rather than merely that the
+   index exists — an index the planner ignores is the original complaint. On
+   `judge_participation_records.reference` the original text was already correct:
+   it is covered by its unique auto-index, and that is now asserted.
 
 Some indexes are redundant with unique constraints or with the leftmost prefix of
 another index - `idx_users_email` duplicates `UNIQUE (email_normalized)`,
