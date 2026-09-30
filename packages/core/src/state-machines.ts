@@ -186,7 +186,40 @@ const judgeMachine = transitionTable<JudgeState>('Judge', [
   { from: 'INVITED', to: 'INVITED', reason: 'Invitation resent.', },
   { from: 'ACCEPTED', to: 'ACTIVE', reason: 'Judge begins reviewing; activated on first scoring activity or explicitly by an organizer.' },
   { from: 'ACCEPTED', to: 'INVITED', reason: 'Judge declines or invitation is withdrawn.', guard: (ctx) => (ctx.override ? null : 'Judges may withdraw themselves; organizers must use an override.') },
-  { from: 'ACTIVE', to: 'COMPLETED', reason: 'All assigned reviews are submitted.' },
+  {
+    from: 'ACTIVE',
+    to: 'COMPLETED',
+    reason: 'All assigned reviews are submitted.',
+    /*
+     * This edge asserts a *fact* about the panel, not a preference of the
+     * judge. "All assigned reviews are submitted" is checkable, and the count
+     * is already computed and handed to the guards as `outstandingAssignments` -
+     * it simply was not consulted here.
+     *
+     * That mattered, because this edge has no guard at all, so any actor the
+     * service authorised could walk through it. A judge authorised to move
+     * their own record could therefore mark themselves complete with work
+     * outstanding, which is a self-certification problem rather than a cosmetic
+     * one: a participation record attests to how much of the panel was
+     * completed, and that attestation is what the completed state feeds.
+     *
+     * The override escape is kept, and is the right escape. An organizer who
+     * genuinely needs to close a judge out - a panel reassigned wholesale, a
+     * judge who has left - passes `override`, and the outcome is recorded as an
+     * override rather than being quietly indistinguishable from the ordinary
+     * path.
+     */
+    guard: (ctx) => {
+      if (ctx.override) return null;
+      const outstanding = ctx.facts.outstandingAssignments;
+      if (typeof outstanding !== 'number') {
+        return 'Cannot verify the assignment count; refusing to record a completion that may not be true.';
+      }
+      return outstanding === 0
+        ? null
+        : `${String(outstanding)} assignment(s) are still outstanding. Complete or reassign them, or pass an explicit organizer override.`;
+    },
+  },
   { from: 'ACTIVE', to: 'ACCEPTED', reason: 'Organizer deactivates the judge; assignments must be reassigned.', guard: (ctx) => (ctx.override ? null : 'Deactivation requires an authorized organizer override.') },
   { from: 'COMPLETED', to: 'ACTIVE', reason: 'Judge is reactivated for additional assignments.' },
 ]);

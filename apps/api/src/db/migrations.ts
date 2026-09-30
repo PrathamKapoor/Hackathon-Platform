@@ -1424,6 +1424,61 @@ CREATE INDEX idx_criterion_scores_rubric_version ON criterion_scores (rubric_ver
 -- published snapshot is the correct behaviour; a missing one would not be.
     `,
   },
+
+  {
+    version: 17,
+    name: 'assignment-strategy-override',
+    sql: `
+-- ------------------------------------------------- conflict override strategy
+--
+-- Migration 16 added a CHECK on judge_assignments.strategy listing the five
+-- ASSIGNMENT_STRATEGIES plus MANUAL. It was right about what the *engine*
+-- produces and wrong about what the *application* writes: the conflict-override
+-- path inserts 'OVERRIDE', to record that no strategy produced this assignment
+-- and a person forced it. So the next conflict override would have failed at
+-- the database with a bare CHECK violation.
+--
+-- It went unnoticed because no test ever performed a real override. The
+-- constraint was doing its job - it caught a value the schema and the code
+-- disagreed about - but a constraint nobody exercises is only a comment, and
+-- this one was a comment that had quietly broken a feature.
+--
+-- 'OVERRIDE' is a legitimate value and the most audit-relevant one on the
+-- column: it is what distinguishes "the engine assigned this" from "someone
+-- overrode the engine for this", and it is why override_by and reason sit
+-- beside it. So it is admitted to the enum rather than removed from the code.
+--
+-- Deliberately not amended into migration 16. Migrations are immutable, the
+-- runner refuses a changed checksum, and editing an applied migration would
+-- mean an operator's database and a fresh clone silently disagreeing about what
+-- the schema is.
+CREATE TABLE judge_assignments_strategy (
+  id             TEXT PRIMARY KEY,
+  event_id       TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  judge_id       TEXT NOT NULL REFERENCES judges(id) ON DELETE CASCADE,
+  submission_id  TEXT NOT NULL REFERENCES submissions(id) ON DELETE CASCADE,
+  version        INTEGER NOT NULL DEFAULT 1,
+  status         TEXT NOT NULL DEFAULT 'ASSIGNED'
+                   CHECK (status IN ('ASSIGNED','IN_PROGRESS','SUBMITTED','SKIPPED','REASSIGNED')),
+  strategy       TEXT NOT NULL DEFAULT 'MANUAL'
+                   CHECK (strategy IN ('MANUAL','RANDOM','BALANCED','CONFLICT_AWARE','WORKLOAD_AWARE','PANEL_DIVERSITY','OVERRIDE')),
+  reason         TEXT NOT NULL DEFAULT '',
+  soft_conflict  INTEGER NOT NULL DEFAULT 0,
+  override_by    TEXT REFERENCES users(id) ON DELETE SET NULL,
+  assigned_at    TEXT NOT NULL,
+  completed_at   TEXT,
+  created_at     TEXT NOT NULL,
+  updated_at     TEXT NOT NULL,
+  UNIQUE (judge_id, submission_id)
+) STRICT;
+INSERT INTO judge_assignments_strategy SELECT * FROM judge_assignments;
+DROP TABLE judge_assignments;
+ALTER TABLE judge_assignments_strategy RENAME TO judge_assignments;
+CREATE INDEX idx_assignments_event_version ON judge_assignments (event_id, version);
+CREATE INDEX idx_assignments_judge ON judge_assignments (judge_id, status);
+CREATE INDEX idx_assignments_submission ON judge_assignments (submission_id);
+    `,
+  },
 ];
 
 export function runMigrations(db: DatabaseSync): { applied: number[]; version: number } {

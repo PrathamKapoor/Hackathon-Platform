@@ -611,6 +611,20 @@ export function registerUploadRoutes(app: FastifyInstance, services: Services, r
     const params = z.object({ submissionId: Id }).parse(request.params);
     const submission = services.submissions.require(params.submissionId);
     requirePermission(services, request.ctx, 'upload', 'create', { ownerId: submission.created_by, inOrganizedEvent: canManageEvent(request.ctx.actor, submission.event_id) }, { resourceType: 'submission', resourceId: submission.id, eventId: submission.event_id });
+    /*
+     * Check the content type before reaching for the file.
+     *
+     * `request.file()` raises a bare `FastifyError: the request is not
+     * multipart` with no `code` property when the request is not multipart, so
+     * the error mapper cannot classify it and the caller got a 500 for the most
+     * ordinary mistake in the API - posting JSON to a file endpoint. Saying so
+     * here gives a specific, actionable 400 and keeps an uncoded library error
+     * out of the 500 path entirely.
+     */
+    const contentType = request.headers['content-type'] ?? '';
+    if (!/^multipart\/form-data/i.test(contentType)) {
+      throw errors.badRequest('This endpoint accepts multipart/form-data with a "file" part.');
+    }
     const file = await (request as { file(): Promise<{ filename: string; mimetype: string; toBuffer(): Promise<Buffer> } | undefined> }).file();
     if (file === undefined) throw errors.badRequest('No file was uploaded. Send multipart/form-data with a "file" part.');
     const buffer = await file.toBuffer();
@@ -724,6 +738,29 @@ export function registerJudgingRoutes(app: FastifyInstance, services: Services, 
   app.post('/api/judges/:judgeId/transition', async (request) => {
     const params = z.object({ judgeId: Id }).parse(request.params);
     const body = z.object({ to: z.enum(['INVITED', 'ACCEPTED', 'ACTIVE', 'COMPLETED']), override: z.boolean().default(false), reason: z.string().max(500).optional() }).parse(request.body);
+    /*
+     * The route enforced nothing and the registry declared `judge:update`, a
+     * grant no non-admin role has. The whole decision lived in the service,
+     * which is defensible on its own terms - but it meant a caller could reach
+     * a route documented as gated by a permission that was never consulted, and
+     * "the two disagree" is exactly the drift the registry exists to prevent.
+     *
+     * The check is scoped the same way the service scopes self-service: an
+     * organizer for the event, or the judge themself. `canManageEvent` is
+     * imported and used elsewhere in this file, so nothing new is introduced.
+     */
+    const judge = services.judges.require(params.judgeId);
+    const actingOnSelf = request.ctx.user?.id === judge.user_id;
+    if (!actingOnSelf) {
+      requirePermission(
+        services,
+        request.ctx,
+        'judge',
+        'update',
+        { inOrganizedEvent: canManageEvent(request.ctx.actor, judge.event_id) },
+        { eventId: judge.event_id, resourceType: 'judge', resourceId: judge.id },
+      );
+    }
     return services.judges.transition(params.judgeId, body.to, body, ctx(request));
   });
   registry.register({ method: 'POST', path: '/api/judges/{judgeId}/transition', tags: ['judges'], auth: 'session', summary: 'Activate, deactivate, reactivate or complete a judge.', permission: { resource: 'judge', action: 'update' } });
@@ -1570,7 +1607,7 @@ export function registerTransferRoutes(app: FastifyInstance, services: Services,
     const result = services.transfer.exportCsv(eventId, params.kind, ctx(request));
     return sendCsv(reply, result.filename, result.csv);
   });
-  registry.register({ method: 'GET', path: '/api/events/{eventId}/exports/{kind}', tags: ['exports'], auth: 'organizer', summary: 'Export one entity as CSV.', permission: { resource: 'export', action: 'read' } });
+  registry.register({ method: 'GET', path: '/api/events/{eventId}/exports/{kind}', tags: ['exports'], auth: 'organizer', summary: 'Export one entity as CSV.', permission: { resource: 'export', action: 'read' }, mutates: true });
 
   app.get('/api/events/:eventId/exports/:kind.json', async (request, reply) => {
     const params = z.object({ eventId: Id, kind: z.enum(EXPORT_KINDS) }).parse(request.params);
@@ -1579,7 +1616,7 @@ export function registerTransferRoutes(app: FastifyInstance, services: Services,
     const result = services.transfer.exportCsv(eventId, params.kind, ctx(request));
     return sendJson(reply, result.filename.replace(/\.csv$/, '.json'), JSON.stringify({ kind: params.kind, eventId, rows: result.rows, columns: result.csv.split('\r\n')[0], csv: result.csv }, null, 2));
   });
-  registry.register({ method: 'GET', path: '/api/events/{eventId}/exports/{kind}.json', tags: ['exports'], auth: 'organizer', summary: 'Export one entity with its schema, as JSON.', permission: { resource: 'export', action: 'read' } });
+  registry.register({ method: 'GET', path: '/api/events/{eventId}/exports/{kind}.json', tags: ['exports'], auth: 'organizer', summary: 'Export one entity with its schema, as JSON.', permission: { resource: 'export', action: 'read' }, mutates: true });
 
   const CsvBody = z.object({ csv: z.string().min(1).max(5_000_000), dryRun: z.boolean().default(true), createAccounts: z.boolean().default(false) });
 

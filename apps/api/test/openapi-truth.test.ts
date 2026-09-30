@@ -391,3 +391,39 @@ test('operations that persist are marked, so a GET that writes cannot hide', asy
     'filing the signals should be documented as a create, not a read',
   );
 });
+
+test('the GETs documented as persisting are exactly the ones that do', async (t) => {
+  /*
+   * Two export endpoints are GET, and both write: an audit row and an
+   * `export_jobs` row. That is deliberate - "an organizer exported this event's
+   * data, when, and how much" is precisely the question an audit ledger exists
+   * to answer, and `export_jobs` is that history.
+   *
+   * The finding was not the writing. It was the writing being invisible: both were
+   * documented as a read, so a client reading the OpenAPI had no way to know that
+   * fetching an export is an event with a history, and crawlers and prefetchers
+   * silently inflate the export log.
+   *
+   * Two of the four export-shaped GETs do *not* write - the manifest and the
+   * registrations export - and were not marked, having been measured rather than
+   * assumed. Which is also why this test does not infer persistence from the
+   * permission verb: `/comments/moderation` is gated on a `moderate` permission
+   * and is a pure read. The verb names who may look at the queue, not what looking
+   * does. Inferring from it would have flagged that route, and "fixing" it by
+   * writing a row would have been the wrong fix. So the contract is pinned here
+   * and the behaviour is proven by measurement in the security suite.
+   */
+  const spec = await liveSpec(t);
+  const declared: string[] = [];
+
+  for (const [path, item] of Object.entries(spec.paths)) {
+    const operation = (item as { get?: Record<string, unknown> }).get;
+    if (operation?.['x-verdict-mutates'] === true) declared.push(path);
+  }
+
+  assert.deepEqual(
+    declared.sort(),
+    ['/api/events/{eventId}/exports/{kind}', '/api/events/{eventId}/exports/{kind}.json'],
+    'the set of GETs documented as persisting changed; confirm each one really writes before pinning it here',
+  );
+});

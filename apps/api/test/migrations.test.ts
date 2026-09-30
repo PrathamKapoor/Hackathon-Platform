@@ -828,3 +828,229 @@ describe('migration 16: the integrity constraints can fail', () => {
     }
   });
 });
+
+/** The assignment indexes migration 16 added, which 17's rebuild must preserve. */
+const INDEXES_16_ADDED = [
+  'idx_assignments_event_version',
+  'idx_assignments_judge',
+  'idx_assignments_submission',
+] as const;
+
+describe('migration 17: OVERRIDE can actually be written', () => {
+  /*
+   * Migration 16 rebuilt `judge_assignments` to add its indexes, and in doing so
+   * restated the `strategy` CHECK. The restatement came from the code's
+   * `AssignmentStrategy` union minus one member, and the missing member was
+   * `OVERRIDE` - the strategy the conflict-override feature has always written.
+   *
+   * So 16 did not merely forget to permit a strategy. It made a working feature
+   * impossible on any database that ran it: every *real* override, the common
+   * case where the pair already has an engine assignment, hit a CHECK violation
+   * and the organizer got a 500.
+   *
+   * The asymmetry is what makes this so easy to ship. A fresh database was
+   * unaffected, because the *initial* schema was right and only the rebuilt table
+   * was wrong - so every test that built its fixture from the initial schema kept
+   * passing, while the upgrade path was broken. Testing the upgrade therefore
+   * means actually performing it, which is what this suite does: build to 16,
+   * seed, upgrade to 17, then do the thing that used to fail.
+   */
+  let db: Database;
+  let dir: string;
+  /** A row written at v16 that must still be readable after the rebuild. */
+  let survivor: { id: string; reason: string; by: string; strategy: string } | null = null;
+
+  before(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'verdict-m17-'));
+    const config = loadConfig({
+      env: 'test',
+      databaseFile: join(dir, 'm17.db'),
+      storageDir: join(dir, 'storage'),
+      logging: { level: 'error', pretty: false },
+      security: { authRateLimitMax: 10_000, rateLimitMax: 100_000 },
+    });
+
+    // To 16 only, so what follows is written against the schema that had the
+    // narrower CHECK - which is the whole point.
+    const raw = buildAtVersion(config.databaseFile, 16);
+    raw.close();
+    db = new Database(config.databaseFile);
+    db.exec('PRAGMA foreign_keys = ON');
+    const { seedDemoData } = await import('../src/seed/seed.ts');
+    await seedDemoData(db, config);
+
+    /*
+     * A person-forced assignment, written at v16.
+     *
+     * The seed does not produce one, which is a second reason the original defect
+     * was invisible: there was no override row anywhere in the fixture data for a
+     * rebuild to lose. So the row is written here, on purpose, with the two
+     * columns that make it worth preserving - `reason` and `override_by` are the
+     * whole difference between "the engine assigned this" and "a person overrode
+     * the engine", and they are what anyone auditing an assignment actually reads.
+     */
+    const judge = db.get<{ id: string; event_id: string }>("SELECT id, event_id FROM judges WHERE state <> 'COMPLETED' LIMIT 1");
+    const submission = db.get<{ id: string }>('SELECT id FROM submissions LIMIT 1');
+    const user = db.get<{ id: string }>('SELECT id FROM users LIMIT 1');
+    assert.ok(judge !== null && submission !== null && user !== null, 'the seed produced nothing to override for');
+    const at = new Date().toISOString();
+    db.exec(
+      `INSERT INTO judge_assignments
+         (id, event_id, judge_id, submission_id, status, strategy, reason, override_by, assigned_at, created_at, updated_at)
+       VALUES ('asg_m17_survivor', :e, :j, :s, 'ASSIGNED', 'WORKLOAD_AWARE', :reason, :by, :at, :at, :at)`,
+      { e: judge.event_id, j: judge.id, s: submission.id, reason: 'the engine double-booked this judge', by: user.id, at },
+    );
+    survivor = { id: 'asg_m17_survivor', reason: 'the engine double-booked this judge', by: user.id, strategy: 'WORKLOAD_AWARE' };
+
+    // And now the upgrade, with that row sitting in the table.
+    db.migrate();
+  });
+
+  after(() => {
+    db.close();
+    discard(dir);
+  });
+
+  const one = <T extends Row>(sql: string, params: Params = {}): T | null => db.get<T>(sql, params) ?? null;
+  const count = (sql: string, params: Params = {}): number => db.value<number>(sql, params) ?? 0;
+
+
+
+  /*
+   * A judge/submission pair not already assigned.
+   *
+   * `UNIQUE (judge_id, submission_id)` is the right constraint, and it is also
+   * why this cannot just reuse the first judge and the first submission: the
+   * second insert in a test run would fail on the constraint instead of on the
+   * thing under test, and the failure would point somewhere else entirely.
+   */
+  const unusedPair = (): { judge: string; event: string; submission: string } => {
+    const row = db.get<Row>(
+      `SELECT j.id AS judge, j.event_id AS event, s.id AS submission
+         FROM judges j CROSS JOIN submissions s
+        WHERE s.event_id = j.event_id
+          AND NOT EXISTS (SELECT 1 FROM judge_assignments a WHERE a.judge_id = j.id AND a.submission_id = s.id)
+        LIMIT 1`,
+    );
+    assert.ok(row !== null, 'the seed produced no unassigned judge/submission pair');
+    return { judge: String(row.judge), event: String(row.event), submission: String(row.submission) };
+  };
+
+  const write = (id: string, strategy: string, overrides = false): void => {
+    const user = db.get<{ id: string }>('SELECT id FROM users LIMIT 1');
+    const pair = unusedPair();
+    const at = new Date().toISOString();
+    db.exec(
+      `INSERT INTO judge_assignments
+         (id, event_id, judge_id, submission_id, status, strategy, reason, override_by, assigned_at, created_at, updated_at)
+       VALUES (:id, :e, :j, :s, 'ASSIGNED', :k, :reason, :by, :at, :at, :at)`,
+      {
+        id,
+        e: pair.event,
+        j: pair.judge,
+        s: pair.submission,
+        k: strategy,
+        reason: 'a reason the organizer typed',
+        by: overrides ? String(user?.id) : null,
+        at,
+      },
+    );
+  };
+
+  test('the upgrade itself succeeds over seeded data', () => {
+    // The premise. If this fails, 17 would have failed on a real operator's
+    // database, and no amount of passing rejection tests afterwards would help.
+    assert.equal(one<{ version: number }>('SELECT MAX(version) AS version FROM schema_migrations')?.version, 17, 'the database is not at 17');
+    assert.ok(count('SELECT COUNT(*) AS n FROM judge_assignments') > 0, 'the seed wrote no assignments, so nothing was upgraded');
+  });
+
+  test('the OVERRIDE strategy is accepted, which is the whole point of 17', () => {
+    write('asg_m17_ok', 'OVERRIDE', true);
+    assert.equal(
+      one<{ strategy: string }>('SELECT strategy FROM judge_assignments WHERE id = :a', { a: 'asg_m17_ok' })?.strategy,
+      'OVERRIDE',
+      'the OVERRIDE strategy could not be written after the upgrade',
+    );
+  });
+
+  test('every strategy the code can produce is accepted', () => {
+    // Restated from the code's union on purpose. If someone adds a strategy and
+    // forgets the schema, this is where it should fail, and the failure names the
+    // missing value rather than surfacing a CHECK violation from three layers down.
+    for (const strategy of ['WORKLOAD_AWARE', 'CONFLICT_AWARE', 'BALANCED', 'OVERRIDE']) {
+      write(`asg_m17_kind_${strategy}`, strategy);
+      assert.equal(
+        one<{ strategy: string }>('SELECT strategy FROM judge_assignments WHERE id = :a', { a: `asg_m17_kind_${strategy}` })?.strategy,
+        strategy,
+        `the schema would not accept ${strategy}`,
+      );
+    }
+  });
+
+  test('an unknown strategy is still refused', () => {
+    // Widening a CHECK must not have removed it.
+    assert.throws(
+      () => write('asg_m17_bad', 'MAKE_ITS_OWN_JUDGMENT_CALL'),
+      /CHECK|constraint/i,
+      'the strategy CHECK was removed rather than widened',
+    );
+  });
+
+  test('the indexes migration 16 added survived the second rebuild', () => {
+    // Dropping a table drops its indexes with it. 16's indexes exist to keep the
+    // assignment queries off a full scan, so losing them would be silent: correct
+    // answers, slowly.
+    const indexes = new Set(db.all<{ name: string }>('PRAGMA index_list(judge_assignments)').map((row) => row.name));
+    for (const expected of INDEXES_16_ADDED) {
+      assert.ok(indexes.has(expected), `the index ${expected} did not survive migration 17`);
+    }
+  });
+
+  test('the rebuild is still used, rather than merely present', () => {
+    // Not "the index exists": a planner that ignores it is the original complaint.
+    const plan = db.all<{ detail: string }>(
+      "EXPLAIN QUERY PLAN SELECT id FROM judge_assignments WHERE event_id = 'evt_x' AND judge_id = 'jud_x' AND status <> 'REASSIGNED'",
+    );
+    const detail = plan.map((row) => String(row.detail)).join(' | ');
+    assert.ok(/USING (INDEX|COVERING INDEX)/i.test(detail), `the assignment query does not use an index: ${detail}`);
+  });
+
+  test('data written before the upgrade is still there, override columns included', () => {
+    /*
+     * A rebuild that copies fewer columns than it drops loses them silently, and
+     * it loses exactly the columns that make an assignment worth auditing. So the
+     * row is compared field by field against what was written at v16, rather than
+     * checked for mere existence.
+     */
+    assert.ok(survivor !== null, 'the pre-upgrade fixture was never written');
+    const row = one<{ reason: string; override_by: string; strategy: string; status: string }>(
+      'SELECT reason, override_by, strategy, status FROM judge_assignments WHERE id = :a',
+      { a: survivor.id },
+    );
+    assert.ok(row !== null, 'the row written before the upgrade did not survive the rebuild');
+    assert.equal(row.reason, survivor.reason, 'the reason a person overrode the engine was lost in the rebuild');
+    assert.equal(row.override_by, survivor.by, 'the person who did the overriding was lost in the rebuild');
+    assert.equal(row.strategy, survivor.strategy, 'the strategy was altered by the rebuild');
+    assert.equal(row.status, 'ASSIGNED', 'the status was altered by the rebuild');
+  });
+
+  test('the foreign keys are intact, not merely the columns', () => {
+    // If foreign keys had been off during the rebuild, or the new table were not
+    // the one the app reads, this would pass on structure and fail in production.
+    const targets = new Set(db.all<Row>('PRAGMA foreign_key_list(judge_assignments)').map((fk) => String(fk.table)));
+    for (const expected of ['events', 'judges', 'submissions']) {
+      assert.ok(targets.has(expected), `judge_assignments no longer references ${expected}`);
+    }
+    assert.throws(
+      () =>
+        db.exec(
+          `INSERT INTO judge_assignments
+             (id, event_id, judge_id, submission_id, status, strategy, assigned_at, created_at, updated_at)
+           VALUES ('asg_m17_orphan', 'evt_nope', 'jud_nope', 'sub_nope', 'ASSIGNED', 'BALANCED', :at, :at, :at)`,
+          { at: new Date().toISOString() },
+        ),
+      /FOREIGN KEY constraint failed/i,
+      'the rebuilt table accepts rows pointing at nothing',
+    );
+  });
+});

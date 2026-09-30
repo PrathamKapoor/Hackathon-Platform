@@ -477,7 +477,29 @@ export class AssignmentService {
       throw errors.validation('A conflict override requires a written justification of at least 15 characters.', [{ field: 'reason' }]);
     }
 
-    this.judges.require(input.judgeId);
+    /*
+     * Both identifiers arrive in the request body, and the event comes from the
+     * route. Nothing tied them together: `require` proved the judge exists and
+     * `hardConflictBetween` proved a conflict was declared, but neither asked
+     * whether the judge or the submission belonged to *this* event. The INSERT
+     * below then wrote `event_id = eventId` beside a foreign judge or
+     * submission, which is how a row ends up claiming to belong to an event
+     * while pointing at another one's data.
+     *
+     * `reassign` in this same file already does both checks. The rule is not
+     * subtle and it was applied in one place and not the other, so it is
+     * enforced here from authoritative server-side rows rather than trusted
+     * from the caller's body.
+     */
+    const judge = this.judges.require(input.judgeId);
+    if (judge.event_id !== eventId) {
+      throw errors.notFound('Judge', input.judgeId);
+    }
+    const submission = this.submissions.require(input.submissionId);
+    if (submission.event_id !== eventId) {
+      throw errors.notFound('Project', input.submissionId);
+    }
+
     const conflict = this.hardConflictBetween(input.judgeId, input.submissionId);
     if (conflict === null) throw errors.preconditionFailed('That judge has no declared conflict with this project.');
 
@@ -488,12 +510,27 @@ export class AssignmentService {
       });
       let row: AssignmentRow | null;
       if (existing !== null) {
-        this.db.exec("UPDATE judge_assignments SET status = 'ASSIGNED', override_by = :by, reason = :reason, updated_at = :at WHERE id = :id", {
-          by: actor.id,
-          reason: `conflict override: ${input.reason.trim()}`,
-          at: ctx.at,
-          id: existing.id,
-        });
+        /*
+         * `strategy` is set here as well as on the insert below.
+         *
+         * It used to be set only on insert, so the same operation recorded two
+         * different things depending on whether the assignment already existed:
+         * a fresh override said `strategy = 'OVERRIDE'`, and overriding an
+         * existing assignment - the common case, since the assignment the
+         * engine made is the one being overridden - left the original engine
+         * strategy standing. The row then claimed the engine had decided
+         * something a person had actually forced, which is precisely the
+         * distinction `override_by` and `reason` exist to preserve.
+         */
+        this.db.exec(
+          "UPDATE judge_assignments SET status = 'ASSIGNED', strategy = 'OVERRIDE', override_by = :by, reason = :reason, updated_at = :at WHERE id = :id",
+          {
+            by: actor.id,
+            reason: `conflict override: ${input.reason.trim()}`,
+            at: ctx.at,
+            id: existing.id,
+          },
+        );
         row = this.findById(existing.id);
       } else {
         const id = newId('judgeAssignment');

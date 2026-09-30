@@ -291,6 +291,24 @@ export function buildOpenApiDocument(options: OpenApiOptions): Record<string, un
     }
     operation['x-verdict-auth'] = route.auth;
 
+    /*
+     * A GET that writes is worth saying out loud.
+     *
+     * Safe methods are supposed to be free of side effects, and the assumption
+     * is load-bearing: it is why a client can prefetch, retry, or let a crawler
+     * fetch a URL twice without thinking about it. The export endpoints are GET
+     * and they do write, on purpose - an audit row and an `export_jobs` row, so
+     * that "who exported this event's participant data, and when" has an answer.
+     *
+     * Emitting the flag keeps that promise honest. A consumer generating a client
+     * can see which reads are really events, and a crawler can be configured not
+     * to inflate the export log.
+     */
+    if (route.mutates) {
+      operation['x-verdict-mutates'] = true;
+      operation.description = `${route.description ?? ''}\n\n**This GET persists a record.** It writes an audit entry and an export history row. It is not safe to prefetch, retry freely, or fetch from a crawler.`.trim();
+    }
+
     entry[route.method.toLowerCase()] = operation;
     paths[route.path] = entry;
   }

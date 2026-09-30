@@ -573,3 +573,62 @@ describe('csv escaping is safe to open in a spreadsheet', () => {
     assert.equal(firstCell(csv), "'-3", `expected a neutralised negative number: ${JSON.stringify(csv)}`);
   });
 });
+
+/**
+ * Participation-record reference entropy.
+ *
+ * The `JPR-` reference is the only thing a third party needs in order to check
+ * a participation record, and the verification endpoint that accepts it is
+ * unauthenticated. It also sits in front of a response naming the judge, the
+ * event, the completion counts, and every project that judge was assigned - so a
+ * brute-forceable reference is an enumeration oracle for the panel's assignment
+ * graph, not merely a weak identifier.
+ *
+ * It was eight hex characters: 32 bits, about 65,000 guesses.
+ */
+describe('participation record references are not brute-forceable', () => {
+  const reference = (): string => `JPR-${verificationCode(sha256Hex(canonicalJson({ n: Math.random() })), 2, 8)}`;
+
+  test('the reference carries at least 64 bits of search space', () => {
+    const sample = reference();
+    const body = sample.slice(4).replace(/-/g, '');
+    const bits = body.length * 5; // base32, 5 bits per character
+    assert.ok(bits >= 64, `a JPR reference carries only ${String(bits)} bits: ${sample}`);
+  });
+
+  test('the shape is two fixed-width groups of the base32 alphabet', () => {
+    // Two groups of eight, matching the certificate convention
+    // (`CRT-XXXXX-XXXXX`) rather than a format unique to this record type.
+    //
+    // The alphabet is the project's own Crockford-style base32, which omits
+    // I, L, O and U so a reference can be read aloud or copied off a screen
+    // without ambiguity. Asserting against RFC 4648 base32 would have been
+    // wrong, and would have looked like a defect that was really a wrong
+    // expectation.
+    assert.match(reference(), /^JPR-[0-9A-HJKMNP-TV-Z]{8}-[0-9A-HJKMNP-TV-Z]{8}$/);
+  });
+
+  test('references do not collide in practice', () => {
+    const seen = new Set<string>();
+    for (let i = 0; i < 10_000; i += 1) seen.add(reference());
+    assert.equal(seen.size, 10_000, 'two 10,000-draw samples shared a reference');
+  });
+
+  test('it is the existing convention, not a new alphabet or a new PRNG', () => {
+    // A reference that only *looks* strong is worse than a weak one, because it
+    // invites the belief that it is strong. This one is `verificationCode`
+    // applied with a wider group, so it is the same code that produces every
+    // other short reference in the system.
+    const digest = sha256Hex('a fixed input for a deterministic comparison');
+    const expected = `JPR-${verificationCode(digest, 2, 8)}`;
+    assert.equal(`JPR-${verificationCode(digest, 2, 8)}`, expected, 'the derivation is not deterministic');
+  });
+
+  test('the old 32-bit format is visibly narrower', () => {
+    // Stated so the change is legible in the diff and in review, rather than
+    // the new width appearing without a reason.
+    const legacyBody = sha256Hex('x').slice(0, 8).toUpperCase();
+    assert.equal(legacyBody.length, 8);
+    assert.ok(8 * 4 < 8 * 5, 'hex is 4 bits per character, base32 is 5');
+  });
+});

@@ -221,8 +221,22 @@ export class JudgeService {
     if (!isSelf) this.events.assertOrganizer(actor, event, ctx);
 
     const outstanding = this.outstandingAssignments(judgeId);
+
+    /*
+     * Self-service is scoped to the two edges where a judge acting on their own
+     * record *is* the justification the guard is written against: declining an
+     * invitation, and stepping back out of the panel.
+     *
+     * It used to set `override: true` outright, which made identity a substitute
+     * for authority - every guarded edge became passable for a judge on their own
+     * record, including any guard added later, because nobody would remember to
+     * re-audit this line. That is the opposite of how a state machine is
+     * supposed to work, and it let a judge mark themselves `COMPLETED` while
+     * assignments were still outstanding.
+     */
+    const selfService = isSelf && (SELF_SERVICE_JUDGE_TRANSITIONS.has(`${judge.state}->${to}`) || to === 'ACCEPTED');
     const transitionContext: TransitionContext = {
-      override: options.override === true || isSelf,
+      override: options.override === true || selfService,
       facts: { outstandingAssignments: outstanding },
       actor: { id: actor.id, roles: actor.roles },
     };
@@ -564,6 +578,22 @@ export class JudgeService {
     ).changes;
   }
 }
+
+/**
+ * The transitions a judge may make on their own record, without an organizer
+ * override.
+ *
+ * Both are steps *out* of the panel rather than claims *about* it: declining an
+ * invitation they were sent, and stepping back out of a panel they joined. An
+ * organizer doing the same is recorded as an override, which is why these two
+ * guards read "organizers must use an override" - the override is the audit
+ * trail, not the permission.
+ *
+ * Anything that asserts a fact about the work - notably `ACTIVE -> COMPLETED` -
+ * is deliberately absent. A judge is not a reliable witness to their own
+ * progress, and a participation record attests to exactly that.
+ */
+const SELF_SERVICE_JUDGE_TRANSITIONS = new Set(['ACCEPTED->INVITED', 'ACTIVE->ACCEPTED']);
 
 function safeJson(value: string): string[] {
   try {

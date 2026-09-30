@@ -12,7 +12,7 @@
  * integrity hash meaningful.
  */
 
-import { canonicalJson, certificateReference, contentHash, sha256Hex } from '@verdict/core/integrity';
+import { canonicalJson, certificateReference, contentHash, sha256Hex, verificationCode } from '@verdict/core/integrity';
 import { newId } from '@verdict/core/ids';
 import { validatePlainText } from '@verdict/core/validation';
 import type { WebhookEvent } from '@verdict/core/types';
@@ -306,7 +306,26 @@ export class CertificateService {
       const integrityHash = sha256Hex(
         canonicalJson({ eventId, judgeId: row.judge_id, assigned, completed, opensAt, closesAt, detail }),
       );
-      const reference = `JPR-${integrityHash.slice(0, 4).toUpperCase()}-${integrityHash.slice(4, 8).toUpperCase()}`;
+      /*
+     * The reference is the only thing a third party needs to check a record, and
+     * the verification endpoint is unauthenticated. It used to be eight hex
+     * characters - 32 bits - which is about 65,000 guesses, and the response
+     * behind it names the judge, names the event, states how much of the panel
+     * they completed, and lists every project they were assigned. Enumerating
+     * that reconstructs the whole judge-to-project assignment graph for an
+     * event, which is exactly the intelligence that enables collusion, and it is
+     * the one thing the threat model says the design is blind to.
+     *
+     * Certificates already solve this: `certificateReference` produces 50 bits.
+     * The same helper is used here with a wider group, giving 80 bits - 12
+     * orders of magnitude more search space, with no new PRNG and no new
+     * alphabet to reason about, because it is the project's existing convention.
+     *
+     * Existing rows are unaffected: lookup is by the `reference` column, so a
+     * record issued under the old format still resolves. Only new issuances use
+     * the wider one, and nothing in the stored data changes when it is reissued.
+     */
+    const reference = `JPR-${verificationCode(integrityHash, 2, 8)}`;
       const id = newId('participationRecord');
 
       this.db.exec(

@@ -225,11 +225,28 @@ export function toApiError(error: unknown): ApiError {
      * exactly the right thing by refusing it.
      */
     const fastifyCode = (error as { code?: unknown }).code;
-    if (typeof fastifyCode === 'string' && fastifyCode.startsWith('FST_ERR_')) {
+    /*
+     * Both prefixes, not just `FST_ERR_`.
+     *
+     * `@fastify/multipart` reports an oversized upload as `FST_REQ_FILE_TOO_LARGE`
+     * and too many parts as `FST_FILES_LIMIT` - the `FST_REQ_` family, not
+     * `FST_ERR_`. The check below only recognised the latter, so every rejected
+     * upload fell through to INTERNAL_ERROR: a 500, a stack trace in the log,
+     * "An unexpected error occurred" to the caller, and a page on the operator's
+     * alerting dashboard for what was a client mistake. The route even
+     * documented `PAYLOAD_TOO_LARGE` as a possible outcome, so the document and
+     * the behaviour disagreed in the worst possible direction: the response
+     * promised a 413 that could never be returned.
+     */
+    const isFastifyCode = typeof fastifyCode === 'string' && (fastifyCode.startsWith('FST_ERR_') || fastifyCode.startsWith('FST_REQ_'));
+    if (isFastifyCode) {
       const bodyTooLarge =
         fastifyCode === 'FST_ERR_CTP_BODY_TOO_LARGE' ||
         fastifyCode === 'FST_ERR_CTP_BODY_TOO_LARGE_FOR_JSON' ||
-        fastifyCode === 'FST_ERR_REQ_BODY_TOO_LARGE';
+        fastifyCode === 'FST_ERR_REQ_BODY_TOO_LARGE' ||
+        // The multipart family, from @fastify/multipart.
+        fastifyCode === 'FST_REQ_FILE_TOO_LARGE' ||
+        fastifyCode === 'FST_FILES_LIMIT';
       if (bodyTooLarge) {
         return new ApiError('PAYLOAD_TOO_LARGE', 'That request body is larger than this instance accepts.');
       }
@@ -245,6 +262,19 @@ export function toApiError(error: unknown): ApiError {
       if (fastifyCode === 'FST_ERR_CTP_INVALID_CONTENT_LENGTH') {
         return new ApiError('BAD_REQUEST', 'The Content-Length header did not match the body received.');
       }
+
+      /*
+       * Anything else from these two families is a malformed or unsupported
+       * *request*, not a fault in the server, and saying so is the difference
+       * between a 400 the caller can act on and a 500 that pages somebody.
+       *
+       * This was found by asking for an upload with no file part: multipart
+       * raises a code outside the list above, it fell through, and the caller
+       * got "an unexpected error occurred" for the most ordinary mistake in the
+       * API. Fastify and its plugins reserve these prefixes for request
+       * validation, so anything unrecognised in them is a 4xx by construction.
+       */
+      return new ApiError('BAD_REQUEST', 'The request body could not be read as multipart/form-data.');
     }
   }
 

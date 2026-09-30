@@ -11,6 +11,7 @@
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHarness, seededEventId, DEMO_PASSWORD, type Harness } from './harness.ts';
+import type { Row } from '../src/db/database.ts';
 
 type ErrorBody = { error: { code: string; message: string } };
 
@@ -586,3 +587,874 @@ describe('security: password reset', () => {
   });
 });
 
+
+/* ==================================================================== *
+ * Identity is not authority.
+ * ==================================================================== */
+
+describe('security: judge state transitions', () => {
+  test('a judge cannot mark themselves complete with assignments outstanding', async (t) => {
+    /*
+     * `ACTIVE -> COMPLETED` asserts a fact about the panel: "all assigned
+     * reviews are submitted". That is checkable, the count was already computed
+     * and handed to the guards as `outstandingAssignments`, and the guard simply
+     * did not consult it - the edge had no guard at all.
+     *
+     * Combined with `override: options.override === true || isSelf` in the
+     * service, that meant a judge could walk their own record straight to
+     * COMPLETED and back to ACTIVE indefinitely. A participation record attests
+     * to how much of a panel was completed, so this is self-certification of
+     * exactly the thing the record is evidence for.
+     */
+    const harness = await createHarness();
+    t.after(() => harness.close());
+    const eventId = seededEventId(harness);
+
+    // Yuki is the seeded judge with deliberately unfinished assignments.
+    const judge = harness.client();
+    await judge.login('yuki@dogfood.dev', DEMO_PASSWORD);
+    const queue = await judge.get<{ judgeId: string; total: number }>(`/api/events/${eventId}/pairwise/queue?pairs=1`);
+    assert.equal(queue.status, 200, `could not read the judge queue: ${queue.raw.slice(0, 160)}`);
+    const judgeId = queue.body.judgeId;
+    assert.ok(judgeId !== undefined, 'no judge id on the queue');
+    assert.ok(queue.body.total > 0, 'the premise needs a judge with outstanding work, and this one has none');
+
+    const attempt = await judge.post(`/api/judges/${judgeId}/transition`, { to: 'COMPLETED' });
+    assert.notEqual(attempt.status, 200, 'a judge marked themselves complete with work outstanding');
+    assert.equal(attempt.status, 409, `expected 409, got ${String(attempt.status)}: ${attempt.raw.slice(0, 220)}`);
+
+    // The state is untouched, which is the part a status code alone would not tell us.
+    const organizer = harness.client();
+    await organizer.login('organizer@dogfood.dev', DEMO_PASSWORD);
+    const panel = await organizer.get<{ data: { id: string; state: string }[] }>(`/api/events/${eventId}/judges`);
+    const row = panel.body.data?.find((entry) => entry.id === judgeId);
+    assert.notEqual(row?.state, 'COMPLETED', 'the judge was moved to COMPLETED despite the refusal');
+  });
+
+  test('an organizer override still completes a judge with work outstanding', async (t) => {
+    // The guard must have an escape. An organizer closing out a judge whose
+    // panel was reassigned, or who has left, is a real case - and it has to be
+    // recorded as an override rather than being indistinguishable from the
+    // ordinary path.
+    const harness = await createHarness();
+    t.after(() => harness.close());
+    const eventId = seededEventId(harness);
+
+    const judge = harness.client();
+    await judge.login('yuki@dogfood.dev', DEMO_PASSWORD);
+    const queue = await judge.get<{ judgeId: string }>(`/api/events/${eventId}/pairwise/queue?pairs=1`);
+    const judgeId = queue.body.judgeId;
+    assert.ok(judgeId !== undefined);
+
+    const organizer = harness.client();
+    await organizer.login('organizer@dogfood.dev', DEMO_PASSWORD);
+    const forced = await organizer.post(`/api/judges/${judgeId}/transition`, {
+      to: 'COMPLETED',
+      override: true,
+      reason: 'regression test: the organizer escape must still work',
+    });
+    assert.equal(forced.status, 200, `the organizer override was refused: ${forced.raw.slice(0, 220)}`);
+
+    const panel = await organizer.get<{ data: { id: string; state: string }[] }>(`/api/events/${eventId}/judges`);
+    assert.equal(
+      panel.body.data?.find((entry) => entry.id === judgeId)?.state,
+      'COMPLETED',
+      'the override reported success but the state did not change',
+    );
+  });
+
+  test('a judge may still step out of the panel on their own record', async (t) => {
+    // The self-service that must survive the scoping. Withdrawing is a step out
+    // of the panel, not a claim about the work in it.
+    const harness = await createHarness();
+    t.after(() => harness.close());
+    const eventId = seededEventId(harness);
+
+    const judge = harness.client();
+    await judge.login('amara@dogfood.dev', DEMO_PASSWORD);
+    const queue = await judge.get<{ judgeId: string }>(`/api/events/${eventId}/pairwise/queue?pairs=1`);
+    const judgeId = queue.body.judgeId;
+    assert.ok(judgeId !== undefined);
+
+    const steppedOut = await judge.post(`/api/judges/${judgeId}/transition`, { to: 'ACCEPTED' });
+    assert.equal(steppedOut.status, 200, `a judge could not step out of the panel: ${steppedOut.raw.slice(0, 220)}`);
+  });
+
+  test('a judge cannot transition another judge, even with override', async (t) => {
+    const harness = await createHarness();
+    t.after(() => harness.close());
+    const eventId = seededEventId(harness);
+
+    const organizer = harness.client();
+    await organizer.login('organizer@dogfood.dev', DEMO_PASSWORD);
+    const panel = await organizer.get<{ data: { id: string }[] }>(`/api/events/${eventId}/judges`);
+    const somebodyElse = panel.body.data?.[0];
+    assert.ok(somebodyElse !== undefined);
+
+    const judge = harness.client();
+    await judge.login('amara@dogfood.dev', DEMO_PASSWORD);
+    const crossJudge = await judge.post(`/api/judges/${somebodyElse.id}/transition`, { to: 'COMPLETED', override: true });
+    assert.notEqual(
+      crossJudge.status,
+      200,
+      `a judge transitioned another judge, and the override flag made it possible: ${crossJudge.raw.slice(0, 200)}`,
+    );
+  });
+
+  test('a participant with no panel role cannot transition anybody', async (t) => {
+    const harness = await createHarness();
+    t.after(() => harness.close());
+    const eventId = seededEventId(harness);
+
+    const organizer = harness.client();
+    await organizer.login('organizer@dogfood.dev', DEMO_PASSWORD);
+    const panel = await organizer.get<{ data: { id: string }[] }>(`/api/events/${eventId}/judges`);
+    const target = panel.body.data?.[0];
+    assert.ok(target !== undefined);
+
+    const participant = harness.client();
+    await participant.login('iris@dogfood.dev', DEMO_PASSWORD);
+    const attempt = await participant.post(`/api/judges/${target.id}/transition`, { to: 'COMPLETED', override: true });
+    assert.notEqual(attempt.status, 200, `a participant transitioned a judge: ${attempt.raw.slice(0, 200)}`);
+  });
+
+  test('a refused transition is recorded in the audit ledger', async (t) => {
+    // A denial that is not written down cannot be reviewed later, and this
+    // particular denial is the one an operator would most want to see.
+    const harness = await createHarness();
+    t.after(() => harness.close());
+    const eventId = seededEventId(harness);
+
+    const judge = harness.client();
+    await judge.login('yuki@dogfood.dev', DEMO_PASSWORD);
+    const queue = await judge.get<{ judgeId: string }>(`/api/events/${eventId}/pairwise/queue?pairs=1`);
+    const judgeId = queue.body.judgeId;
+    assert.ok(judgeId !== undefined);
+    await judge.post(`/api/judges/${judgeId}/transition`, { to: 'COMPLETED' });
+
+    const organizer = harness.client();
+    await organizer.login('organizer@dogfood.dev', DEMO_PASSWORD);
+    const audit = await organizer.get<{ data: { action: string; outcome: string; resourceId?: string }[] }>(
+      `/api/events/${eventId}/audit?action=judge.state_changed&perPage=200`,
+    );
+    const denial = (audit.body.data ?? []).find((row) => row.resourceId === judgeId && row.outcome === 'DENIED');
+    assert.ok(denial !== undefined, 'the refused transition left no DENIED entry in the audit ledger');
+  });
+});
+/* ==================================================================== *
+ * The conflict-override path, end to end.
+ * ==================================================================== */
+
+describe('security: conflict override', () => {
+  /**
+   * Declare a HARD conflict between a judge and a project. Declaring is the
+   * precondition for overriding, so a test that skipped it would be testing
+   * nothing.
+   */
+  async function declareHardConflict(
+    harness: Awaited<ReturnType<typeof createHarness>>,
+    eventId: string,
+    judgeId: string,
+    projectId: string,
+  ): Promise<void> {
+    const organizer = harness.client();
+    await organizer.login('organizer@dogfood.dev', DEMO_PASSWORD);
+    const declared = await organizer.post<{ id: string }>(`/api/events/${eventId}/conflicts`, {
+      judgeId,
+      kind: 'TEAM',
+      severity: 'HARD',
+      projectId,
+      subjectKind: 'TEAM',
+      note: 'regression test: the judge is on the submitting team',
+    });
+    assert.equal(declared.status, 201, `could not declare the conflict: ${declared.raw.slice(0, 240)}`);
+  }
+
+  /** The first seeded judge, a seeded project, and a real assignment. */
+  async function overrideFixture(
+    harness: Awaited<ReturnType<typeof createHarness>>,
+  ): Promise<{ eventId: string; judgeId: string; projectId: string; assignmentId: string }> {
+    const eventId = seededEventId(harness);
+    const organizer = harness.client();
+    await organizer.login('organizer@dogfood.dev', DEMO_PASSWORD);
+    const panel = await organizer.get<{ data: { id: string }[] }>(`/api/events/${eventId}/judges`);
+    const assignments = await organizer.get<{ data: { id: string }[] }>(`/api/events/${eventId}/assignments?perPage=200`);
+    const projects = await organizer.get<{ data: { id: string }[] }>(`/api/events/${eventId}/submissions?perPage=1`);
+    const judgeId = panel.body.data?.[0]?.id;
+    const assignmentId = assignments.body.data?.[0]?.id;
+    const projectId = projects.body.data?.[0]?.id;
+    assert.ok(judgeId !== undefined && assignmentId !== undefined && projectId !== undefined, 'the seeded fixture is incomplete');
+    return { eventId, judgeId, projectId, assignmentId };
+  }
+
+  test('a real override works, and is recorded as an override', async (t) => {
+    /*
+     * This is the test whose absence let migration 16 ship a broken feature. The
+     * new CHECK on `judge_assignments.strategy` did not list `OVERRIDE`, which
+     * is the value this path writes, so the next real override would have failed
+     * at the database. Nothing failed, because nothing had ever performed one.
+     */
+    const harness = await createHarness();
+    t.after(() => harness.close());
+    const { eventId, judgeId, projectId, assignmentId } = await overrideFixture(harness);
+    await declareHardConflict(harness, eventId, judgeId, projectId);
+
+    const organizer = harness.client();
+    await organizer.login('organizer@dogfood.dev', DEMO_PASSWORD);
+    const forced = await organizer.post<{ id: string }>(`/api/assignments/${assignmentId}/conflict-override`, {
+      judgeId,
+      submissionId: projectId,
+      reason: 'the project team changed after the conflict was declared',
+      confirm: true,
+    });
+    assert.equal(forced.status, 200, `a real conflict override was refused: ${forced.raw.slice(0, 260)}`);
+
+    // The strategy is recorded as an override. It used to be set only on insert,
+    // so overriding the *existing* engine assignment - the common case - left
+    // the engine strategy standing, and the row claimed the engine had decided
+    // something a person had actually forced.
+    //
+    // Read from the database, and read the row the service actually resolved:
+    // the route's `assignmentId` is used for the permission check, and the
+    // service then finds the assignment by (judge, submission), so the two are
+    // not guaranteed to be the same row. Asserting against the URL's id would
+    // have checked the wrong record and passed for the wrong reason.
+    const stored = harness.db.get<{ strategy: string }>(
+      'SELECT strategy FROM judge_assignments WHERE judge_id = :j AND submission_id = :s',
+      { j: judgeId, s: projectId },
+    );
+    assert.equal(stored?.strategy, 'OVERRIDE', `the override was recorded as "${String(stored?.strategy)}"`);
+
+    // And it is in the ledger as an override, not as an ordinary assignment.
+    const audit = await organizer.get<{ data: { action: string }[] }>(
+      `/api/events/${eventId}/audit?action=conflict.override&perPage=50`,
+    );
+    assert.ok((audit.body.data ?? []).length > 0, 'the override left no conflict.override entry in the ledger');
+  });
+
+  /**
+   * A second event with a judge and a project in it, so "another event" is a
+   * real row rather than a plausible-looking id.
+   *
+   * A created event is empty - no judge, no submission - so pointing at one and
+   * asserting a 404 would pass for the wrong reason: the service would reject a
+   * row that does not exist, not one that belongs elsewhere. Only an id that
+   * resolves, and resolves to a different event, tests the scoping.
+   */
+  async function secondEventWithData(
+    harness: Awaited<ReturnType<typeof createHarness>>,
+    slug: string,
+  ): Promise<{ eventId: string; judgeId: string; projectId: string }> {
+    const admin = harness.client();
+    await admin.login('admin@hackathonraptors.dev', DEMO_PASSWORD);
+    const created = await admin.request('POST', '/api/events', {
+      csrf: true,
+      payload: { slug, name: `Other ${slug}`, description: 'for the cross-event scoping tests' },
+    });
+    assert.equal(created.status, 201, `could not create the second event: ${created.raw.slice(0, 240)}`);
+    const eventId = (JSON.parse(created.raw) as { id: string }).id;
+
+    // The admin is the organizer of the event it just created, so it can staff it.
+    const team = await admin.post<{ id: string }>(`/api/events/${eventId}/teams`, {
+      name: 'Other Team',
+      description: 'a team in the second event',
+    });
+    assert.equal(team.status, 201, `could not create a team in the second event: ${team.raw.slice(0, 240)}`);
+
+    const submission = await admin.post<{ id: string }>(`/api/events/${eventId}/submissions`, {
+      teamId: team.body.id,
+      projectName: 'Other Project',
+      shortDescription: 'A project in the second event.',
+    });
+    assert.equal(submission.status, 201, `could not create a submission in the second event: ${submission.raw.slice(0, 240)}`);
+
+    // A judge, invited to the second event. The invite takes a list, not a single
+    // address - which the first version of this fixture got wrong, and which
+    // produced a 422 rather than a judge.
+    const invite = await admin.post<{ userId?: string }>(`/api/events/${eventId}/judges/invite`, {
+      emails: ['ben@dogfood.dev'],
+      panelRole: 'GENEROUS',
+    });
+    assert.ok(
+      invite.status === 200 || invite.status === 201,
+      `could not put a judge on the second panel: ${invite.raw.slice(0, 240)}`,
+    );
+    const found = harness.db.get<{ id: string }>('SELECT id FROM judges WHERE event_id = :e LIMIT 1', { e: eventId });
+    assert.ok(found !== null && found !== undefined, 'the second event still has no judge after inviting one');
+    return { eventId, judgeId: found.id, projectId: submission.body.id };
+  }
+
+  test('the override refuses a submission from another event', async (t) => {
+    // The body is the caller's, and the event is the route's. Nothing tied them
+    // together, so a submission id from elsewhere would be written into this
+    // event's assignment table - a row that claims one event and points at
+    // another one's data.
+    const harness = await createHarness();
+    t.after(() => harness.close());
+    const { assignmentId, judgeId } = await overrideFixture(harness);
+    const other = await secondEventWithData(harness, 'other-projects');
+
+    const organizer = harness.client();
+    await organizer.login('organizer@dogfood.dev', DEMO_PASSWORD);
+    const response = await organizer.post(`/api/assignments/${assignmentId}/conflict-override`, {
+      judgeId,
+      submissionId: other.projectId,
+      reason: 'attempting to pull a foreign project into this event',
+      confirm: true,
+    });
+    assert.notEqual(
+      response.status,
+      200,
+      `the override accepted a submission from another event: ${response.raw.slice(0, 220)}`,
+    );
+  });
+
+  test('the override refuses a judge from another event', async (t) => {
+    const harness = await createHarness();
+    t.after(() => harness.close());
+    const { assignmentId, projectId } = await overrideFixture(harness);
+    const other = await secondEventWithData(harness, 'other-panel');
+
+    const organizer = harness.client();
+    await organizer.login('organizer@dogfood.dev', DEMO_PASSWORD);
+    const response = await organizer.post(`/api/assignments/${assignmentId}/conflict-override`, {
+      judgeId: other.judgeId,
+      submissionId: projectId,
+      reason: 'attempting to bring a foreign judge into this event',
+      confirm: true,
+    });
+    assert.notEqual(response.status, 200, `the override accepted a judge from another event: ${response.raw.slice(0, 220)}`);
+  });
+
+  test('the override refuses an unconfirmed request', async (t) => {
+    // `confirm: z.literal(true)` makes an omitted or false confirmation a schema
+    // violation, rejected with 422 before the service is reached at all. The
+    // service's own 412 check is defence in depth for callers that are not this
+    // route; this asserts the status a caller actually observes.
+    const harness = await createHarness();
+    t.after(() => harness.close());
+    const { eventId, judgeId, projectId, assignmentId } = await overrideFixture(harness);
+    await declareHardConflict(harness, eventId, judgeId, projectId);
+
+    const organizer = harness.client();
+    await organizer.login('organizer@dogfood.dev', DEMO_PASSWORD);
+    const reason = 'a reason that is comfortably longer than fifteen characters';
+
+    const omitted = await organizer.post(`/api/assignments/${assignmentId}/conflict-override`, {
+      judgeId,
+      submissionId: projectId,
+      reason,
+    });
+    assert.equal(omitted.status, 422, `an unconfirmed override returned ${String(omitted.status)}: ${omitted.raw.slice(0, 160)}`);
+
+    const explicitlyFalse = await organizer.post(`/api/assignments/${assignmentId}/conflict-override`, {
+      judgeId,
+      submissionId: projectId,
+      reason,
+      confirm: false,
+    });
+    assert.equal(explicitlyFalse.status, 422, `confirm: false returned ${String(explicitlyFalse.status)}`);
+  });
+
+  test('a participant cannot override a conflict', async (t) => {
+    const harness = await createHarness();
+    t.after(() => harness.close());
+    const { assignmentId, judgeId, projectId } = await overrideFixture(harness);
+
+    const participant = harness.client();
+    await participant.login('iris@dogfood.dev', DEMO_PASSWORD);
+    const attempt = await participant.post(`/api/assignments/${assignmentId}/conflict-override`, {
+      judgeId,
+      submissionId: projectId,
+      reason: 'a participant should never get this far',
+      confirm: true,
+    });
+    assert.notEqual(attempt.status, 200, `a participant performed a conflict override: ${attempt.raw.slice(0, 200)}`);
+  });
+});
+/* ==================================================================== *
+ * Uploads.
+ * ==================================================================== */
+
+/** A real 1x1 PNG, so the bytes pass signature validation. */
+const PNG_1X1 = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+  'base64',
+);
+
+function multipartBody(bytes: Buffer, filename = 'shot.png', mimetype = 'image/png'): {
+  body: Buffer;
+  boundary: string;
+} {
+  const boundary = `----verdicttest${String(Date.now())}${Math.floor(Math.random() * 1e6).toString(16)}`;
+  const head = Buffer.from(
+    `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: ${mimetype}\r\n\r\n`,
+    'utf8',
+  );
+  const tail = Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8');
+  return { body: Buffer.concat([head, bytes, tail]), boundary };
+}
+
+type HarnessClient = Awaited<ReturnType<Awaited<ReturnType<typeof createHarness>>['client']>>;
+
+describe('security: uploads', () => {
+  /**
+   * A submission the participant owns, plus the *same* client signed in as them.
+   *
+   * Both details matter. The submission is created over the API rather than read
+   * from the seed, because the seed's submissions belong to various users and
+   * one is LOCKED - a fixture that looked for "a submission to upload to" would
+   * be testing the seed's shape instead of the upload route, and would silently
+   * skip itself the day the seed changes.
+   *
+   * And the client is returned because `harness.client()` hands back a *new*
+   * cookie jar on every call. Asking for a second client is how the first
+   * version of these tests got 401s and then reported the 413 check as failing,
+   * when the 413 was never actually exercised at all.
+   */
+  async function ownSubmission(harness: Awaited<ReturnType<typeof createHarness>>): Promise<{
+    eventId: string;
+    submissionId: string;
+    client: HarnessClient;
+  }> {
+    const eventId = seededEventId(harness);
+    const client = harness.client();
+    await client.login('iris@dogfood.dev', DEMO_PASSWORD);
+    const team = harness.db.get<{ id: string }>(
+      'SELECT t.id FROM teams t JOIN users u ON u.id = t.captain_id WHERE u.email_normalized = :e LIMIT 1',
+      { e: 'iris@dogfood.dev' },
+    );
+    assert.ok(team !== null, 'the demo participant does not captain a team');
+    const created = await client.post<{ id: string }>(`/api/events/${eventId}/submissions`, {
+      teamId: team.id,
+      projectName: 'Upload Fixture',
+      shortDescription: 'A submission owned by the participant, for the upload tests.',
+    });
+    assert.equal(created.status, 201, `could not create the fixture submission: ${created.raw.slice(0, 240)}`);
+    return { eventId, submissionId: created.body.id, client };
+  }
+
+  const upload = (
+    client: HarnessClient,
+    submissionId: string,
+    bytes: Buffer,
+    filename?: string,
+    mimetype?: string,
+  ) => {
+    const { body, boundary } = multipartBody(bytes, filename, mimetype);
+    return client.request('POST', `/api/submissions/${submissionId}/uploads`, {
+      payload: body,
+      headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+    });
+  };
+
+  test('a normal image is accepted', async (t) => {
+    const harness = await createHarness();
+    t.after(() => harness.close());
+    const { submissionId, client } = await ownSubmission(harness);
+    const response = await upload(client, submissionId, PNG_1X1);
+    assert.equal(response.status, 201, `a valid upload was refused: ${response.raw.slice(0, 240)}`);
+    assert.match(response.raw, /"id"\s*:\s*"upl_/, 'the upload returned no id');
+  });
+
+  test('an oversized upload is a 413, not a 500', async (t) => {
+    /*
+     * `@fastify/multipart` reports an oversized file as `FST_REQ_FILE_TOO_LARGE`.
+     * The error mapper only recognised the `FST_ERR_` family, so every rejected
+     * upload fell through to INTERNAL_ERROR: a 500, a stack trace in the log,
+     * "An unexpected error occurred" to the caller, and an alert for the operator
+     * on what was a client mistake. The route even documented
+     * `PAYLOAD_TOO_LARGE`, so the document promised a 413 that could not be
+     * returned.
+     */
+    const harness = await createHarness();
+    t.after(() => harness.close());
+    const { submissionId, client } = await ownSubmission(harness);
+
+    // Comfortably past the 8 MiB limit, without being absurd.
+    const oversized = Buffer.alloc(9 * 1024 * 1024, 0x41);
+    PNG_1X1.copy(oversized, 0);
+    const response = await upload(client, submissionId, oversized, 'huge.png', 'image/png');
+
+    assert.equal(
+      response.status,
+      413,
+      `an oversized upload returned ${String(response.status)} rather than 413: ${response.raw.slice(0, 240)}`,
+    );
+    const parsed = JSON.parse(response.raw) as { error?: { code?: string } };
+    assert.equal(parsed.error?.code, 'PAYLOAD_TOO_LARGE', `unexpected error code: ${response.raw.slice(0, 200)}`);
+    assert.doesNotMatch(response.raw, /at .*\.ts:\d+/, 'the response leaked a stack trace');
+    assert.doesNotMatch(response.raw, /\/app\//, 'the response leaked a filesystem path');
+  });
+
+  test('malformed multipart is a client error, not a server error', async (t) => {
+    const harness = await createHarness();
+    t.after(() => harness.close());
+    const { submissionId, client } = await ownSubmission(harness);
+    const response = await client.request('POST', `/api/submissions/${submissionId}/uploads`, {
+      // Declares a boundary that is not in the body at all.
+      payload: Buffer.from('this is not multipart'),
+      headers: { 'content-type': 'multipart/form-data; boundary=absent-from-body' },
+    });
+    assert.ok(
+      response.status >= 400 && response.status < 500,
+      `malformed multipart returned ${String(response.status)}: ${response.raw.slice(0, 200)}`,
+    );
+  });
+
+  test('a request with no file part is a client error', async (t) => {
+    const harness = await createHarness();
+    t.after(() => harness.close());
+    const { submissionId, client } = await ownSubmission(harness);
+    const response = await client.request('POST', `/api/submissions/${submissionId}/uploads`, {
+      payload: { kind: 'SCREENSHOT' },
+    });
+    assert.ok(
+      response.status >= 400 && response.status < 500,
+      `a fileless upload returned ${String(response.status)}: ${response.raw.slice(0, 200)}`,
+    );
+  });
+
+  test('someone else cannot upload to a submission they do not own', async (t) => {
+    const harness = await createHarness();
+    t.after(() => harness.close());
+    const { submissionId } = await ownSubmission(harness);
+
+    const stranger = harness.client();
+    await stranger.login('amara@dogfood.dev', DEMO_PASSWORD);
+    const response = await upload(stranger, submissionId, PNG_1X1);
+    assert.notEqual(response.status, 201, `a judge uploaded to somebody else's submission: ${response.raw.slice(0, 200)}`);
+  });
+
+  test('a path-traversal filename is stored under a generated name', async (t) => {
+    const harness = await createHarness();
+    t.after(() => harness.close());
+    const { submissionId, client } = await ownSubmission(harness);
+
+    const response = await upload(client, submissionId, PNG_1X1, '../../../../etc/pwned.png');
+    assert.equal(response.status, 201, `the upload was refused: ${response.raw.slice(0, 200)}`);
+
+    const stored = harness.db.get<{ stored_name: string; original_name: string }>(
+      'SELECT stored_name, original_name FROM uploads ORDER BY created_at DESC LIMIT 1',
+    );
+    assert.ok(stored !== null, 'the upload was not recorded');
+    assert.match(stored.stored_name, /^upl_/, `the stored filename is not generated: ${stored.stored_name}`);
+    assert.doesNotMatch(stored.stored_name, /\.\./, 'the stored filename contains a traversal sequence');
+    // The original is kept for display, which is the safe thing to do with it.
+    assert.equal(stored.original_name, 'pwned.png', 'the original name should be sanitized, not rejected');
+  });
+
+  test('an SVG is refused, because it is a document that can carry script', async (t) => {
+    // SVG is a legitimate image format, and this endpoint serves uploads back on
+    // the application's own origin.
+    const harness = await createHarness();
+    t.after(() => harness.close());
+    const { submissionId, client } = await ownSubmission(harness);
+
+    const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>', 'utf8');
+    const response = await upload(client, submissionId, svg, 'payload.svg', 'image/svg+xml');
+    assert.equal(response.status, 415, `an SVG was accepted: ${response.raw.slice(0, 200)}`);
+  });
+});
+/* ==================================================================== *
+ * GETs that persist.
+ * ==================================================================== */
+
+/**
+ * The tables that make up the domain proper: the data a GET must never touch.
+ *
+ * `export_jobs` and `audit_log` are excluded on purpose - they are the two places
+ * a deliberate read-side record is allowed to land. Everything else in here is
+ * the thing the export is a *view of*, so any change to it means the read is
+ * doing more than reading.
+ */
+const DOMAIN_TABLES = [
+  'submissions',
+  'scores',
+  'criterion_scores',
+  'judge_assignments',
+  'judge_conflicts',
+  'judges',
+  'comments',
+  'certificates',
+  'teams',
+  'events',
+  'users',
+  'result_snapshots',
+  'result_runs',
+  'rubric_criteria',
+  'registration_responses',
+] as const;
+
+function count(harness: Awaited<ReturnType<typeof createHarness>>, table: string, where = '1 = 1'): number {
+  return Number(harness.db.get<{ n: number }>(`SELECT COUNT(*) AS n FROM ${table} WHERE ${where}`)?.n ?? 0);
+}
+
+function fingerprint(harness: Awaited<ReturnType<typeof createHarness>>): string {
+  return DOMAIN_TABLES.map((table) => {
+    // `SELECT *` is ordered by rowid so the digest is stable, and every table
+    // here has one.
+    const rows = harness.db.all<Row>(`SELECT * FROM ${table} ORDER BY rowid`);
+    return `${table}=${JSON.stringify(rows)}`;
+  }).join('|');
+}
+
+describe('security: read-side persistence', () => {
+  /**
+   * What each export GET actually does, measured rather than assumed.
+   *
+   * The suspicion going in was "the export GETs write, which is surprising for a
+   * GET". Half of it was right, and the half that was wrong is the interesting
+   * part: only the two that go through `transfer.exportCsv` record anything. The
+   * manifest and the registrations export are pure reads, in a different
+   * service, and marking them alongside the other two would have been a
+   * documentation change nobody could check.
+   *
+   * So the table below is the answer, and the test asserts the server agrees.
+   */
+  const WRITES: Record<string, boolean> = {
+    '/api/events/{eventId}/exports/{kind}': true,
+    '/api/events/{eventId}/exports/{kind}.json': true,
+    '/api/events/{eventId}/exports/manifest': false,
+    '/api/events/{eventId}/registrations/export': false,
+  };
+
+  test('each export GET writes exactly what it is supposed to, and no more', async (t) => {
+    /*
+     * A safe method is assumed to be free of side effects, and the assumption is
+     * load-bearing: it is why a client can prefetch, retry, or let a crawler fetch
+     * a URL twice without thinking about it.
+     *
+     * Two of these four do write, on purpose. An audit ledger that cannot answer
+     * "who exported this event's participant data, and when" is not much of a
+     * ledger, and `export_jobs` is that history in a form an organizer can read.
+     * The boundary worth proving is that the write stays inside those two tables
+     * - if a read ever stamped "last exported" onto the project, that would be a
+     * mutation wearing a GET's clothes, and a race between two organizers.
+     */
+    const harness = await createHarness();
+    t.after(() => harness.close());
+    const eventId = seededEventId(harness);
+
+    const organizer = harness.client();
+    await organizer.login('organizer@dogfood.dev', DEMO_PASSWORD);
+
+    const urls: [string, string][] = [
+      ['/api/events/{eventId}/exports/{kind}', `/api/events/${eventId}/exports/SUBMISSIONS`],
+      ['/api/events/{eventId}/exports/{kind}.json', `/api/events/${eventId}/exports/SUBMISSIONS.json`],
+      ['/api/events/{eventId}/exports/manifest', `/api/events/${eventId}/exports/manifest`],
+      ['/api/events/{eventId}/registrations/export', `/api/events/${eventId}/registrations/export`],
+    ];
+
+    for (const [label, url] of urls) {
+      const before = fingerprint(harness);
+      const jobsBefore = count(harness, 'export_jobs');
+      const auditsBefore = count(harness, 'audit_events', "action = 'export.generated'");
+
+      const response = await organizer.get(url);
+      assert.equal(response.status, 200, `${url} failed: ${response.raw.slice(0, 200)}`);
+
+      assert.equal(fingerprint(harness), before, `${url} changed the data it exports`);
+      const expectedWrites = WRITES[label] ? 1 : 0;
+      assert.equal(
+        count(harness, 'export_jobs') - jobsBefore,
+        expectedWrites,
+        `${url} recorded ${String(count(harness, 'export_jobs') - jobsBefore)} export rows, expected ${String(expectedWrites)}`,
+      );
+      assert.equal(
+        count(harness, 'audit_events', "action = 'export.generated'") - auditsBefore,
+        expectedWrites,
+        `${url} left ${String(count(harness, 'audit_events', "action = 'export.generated'") - auditsBefore)} audit rows, expected ${String(expectedWrites)}`,
+      );
+    }
+  });
+
+  test('the export history says who exported, when, and how much', async (t) => {
+    // A row that cannot answer those three questions is not a history.
+    const harness = await createHarness();
+    t.after(() => harness.close());
+    const eventId = seededEventId(harness);
+
+    const organizer = harness.client();
+    await organizer.login('organizer@dogfood.dev', DEMO_PASSWORD);
+    await organizer.get<string>(`/api/events/${eventId}/exports/SUBMISSIONS`);
+
+    const job = harness.db.get<{
+      kind: string;
+      status: string;
+      row_count: number;
+      checksum: string;
+      created_by: string;
+      created_at: string;
+    }>('SELECT kind, status, row_count, checksum, created_by, created_at FROM export_jobs ORDER BY created_at DESC LIMIT 1');
+    assert.ok(job !== null, 'no export was recorded');
+    assert.equal(job.kind, 'SUBMISSIONS');
+    assert.equal(job.status, 'COMPLETED');
+    assert.ok(job.row_count > 0, 'the export recorded no rows');
+    assert.equal(job.created_by, await organizer.userId(), 'the export is not attributed to the organizer who took it');
+    assert.ok(job.created_at.length > 0, 'the export has no timestamp');
+  });
+
+  test('the moderation queue is a pure read, despite the "moderate" permission', async (t) => {
+    /*
+     * The route is gated on a `moderate` permission, which reads like an action
+     * and is not one. Loading the queue marks nothing, dismisses nothing, and
+     * escalates nothing - an organizer opening the page in a background tab must
+     * not quietly change the state of every comment in it.
+     *
+     * This is the control for the table above: a permission verb is not evidence
+     * of a write, and the only way to tell them apart is to measure.
+     */
+    const harness = await createHarness();
+    t.after(() => harness.close());
+    const eventId = seededEventId(harness);
+
+    const organizer = harness.client();
+    await organizer.login('organizer@dogfood.dev', DEMO_PASSWORD);
+
+    const before = fingerprint(harness);
+    const auditsBefore = count(harness, 'audit_events');
+
+    const response = await organizer.get(`/api/events/${eventId}/comments/moderation`);
+    assert.equal(response.status, 200, `the moderation queue failed: ${response.raw.slice(0, 240)}`);
+
+    assert.equal(fingerprint(harness), before, 'reading the moderation queue changed the comments');
+    assert.equal(count(harness, 'audit_events'), auditsBefore, 'reading the moderation queue wrote an audit row');
+  });
+
+  test('an export is refused to a participant, so no history is written for them', async (t) => {
+    const harness = await createHarness();
+    t.after(() => harness.close());
+    const eventId = seededEventId(harness);
+
+    const participant = harness.client();
+    await participant.login('iris@dogfood.dev', DEMO_PASSWORD);
+    const jobsBefore = count(harness, 'export_jobs');
+
+    const response = await participant.get(`/api/events/${eventId}/exports/SUBMISSIONS`);
+    assert.notEqual(response.status, 200, `a participant exported the event: ${response.raw.slice(0, 200)}`);
+
+    assert.equal(count(harness, 'export_jobs'), jobsBefore, 'a refused export still recorded a job');
+  });
+});
+/* ==================================================================== *
+ * Participation record references.
+ * ==================================================================== */
+
+describe('security: participation record references', () => {
+  /*
+   * The reference was `JPR-` plus 8 hex characters - 32 bits of entropy, in a
+   * document people are invited to share publicly.
+   *
+   * Thirty-two bits is not a lot. A record is found by guessing its reference, so
+   * an attacker who wants to know what a judge scored simply tries references
+   * until one resolves: a few billion attempts against a public endpoint, with
+   * no rate limit on the guessing because the endpoint is meant to be open. Worse,
+   * it looked fine - it was short, it was readable, it was the same shape as
+   * every other reference in the system.
+   *
+   * New records therefore carry `JPR-` plus two eight-character Crockford groups
+   * - about 80 bits - reusing the same `verificationCode` the rest of the
+   * application uses rather than inventing a second alphabet.
+   *
+   * The part that is easy to get wrong is the old records. Tightening the format
+   * is worthless if it invalidates the ones already issued and already in
+   * organizers' hands, so the lookup is still an exact match on the stored column
+   * and both formats resolve. The test below pins that, by writing a legacy row
+   * by hand and verifying it the way a judge with a two-year-old link would.
+   */
+  const LEGACY = 'JPR-3F9A2B7C';
+
+  /**
+   * The verdict at a reference, or null.
+   *
+   * This endpoint answers 200 either way - "no such record" is an answer to the
+   * question "is this record genuine?", not a transport failure. Asserting on the
+   * HTTP status would therefore pass whether the record was found or not, which is
+   * a test that cannot fail. The contract that matters is the `status` field.
+   */
+  async function verdictAt(
+    harness: Awaited<ReturnType<typeof createHarness>>,
+    reference: string,
+  ): Promise<{ http: number; status: string; valid: boolean }> {
+    const response = await harness.client().get<{ status: string; valid: boolean }>(
+      `/api/participation-records/${reference}`,
+    );
+    return { http: response.status, status: String(response.body?.status), valid: response.body?.valid === true };
+  }
+
+  /**
+   * A genuinely issued record, relabelled with an old-format reference.
+   *
+   * The earlier version of this fixture hand-wrote a row with a plausible hash,
+   * which meant the record was found and reported TAMPERED - so the test could
+   * not tell "the old reference resolved" from "the old reference resolved to
+   * something wrong". Rewriting the reference on a real record is also closer to
+   * the actual situation: the reference is the only thing that changes format,
+   * and everything behind it was always the same.
+   */
+  function legacyReference(harness: Awaited<ReturnType<typeof createHarness>>, reference: string): string {
+    const issued = harness.db.get<{ id: string }>('SELECT id FROM judge_participation_records ORDER BY issued_at DESC LIMIT 1');
+    assert.ok(issued !== null, 'the seed issued no participation record to relabel');
+    harness.db.exec('UPDATE judge_participation_records SET reference = :r WHERE id = :id', {
+      r: reference,
+      id: issued.id,
+    });
+    return issued.id;
+  }
+
+  test('a reference issued before the format change still verifies', async (t) => {
+    const harness = await createHarness();
+    t.after(() => harness.close());
+    legacyReference(harness, LEGACY);
+
+    const verdict = await verdictAt(harness, LEGACY);
+    assert.equal(verdict.status, 'VALID', `an already-issued reference stopped verifying: ${verdict.status}`);
+    assert.equal(verdict.valid, true, 'an already-issued reference was reported as not genuine');
+  });
+
+  test('and it is found case-insensitively, as it always was', async (t) => {
+    // A judge reading a printed certificate types what they see. The lookup
+    // upper-cases before matching, and that behaviour is older than the format
+    // change - so it has to survive it.
+    const harness = await createHarness();
+    t.after(() => harness.close());
+    legacyReference(harness, LEGACY);
+
+    const upper = await verdictAt(harness, LEGACY);
+    const lower = await verdictAt(harness, LEGACY.toLowerCase());
+    assert.equal(lower.status, upper.status, 'a lower-case reference resolves differently from an upper-case one');
+  });
+
+  test('a reference that is merely a prefix of a real one does not resolve', async (t) => {
+    // Exact-column lookup, not a prefix search. If this were ever relaxed to
+    // "starts with", the entropy increase would be undone in one edit - and
+    // quietly, because a prefix search on a short reference still looks correct.
+    const harness = await createHarness();
+    t.after(() => harness.close());
+    legacyReference(harness, LEGACY);
+
+    const verdict = await verdictAt(harness, 'JPR-3F9A2B');
+    assert.equal(verdict.status, 'NOT_FOUND', 'a truncated reference resolved to a record');
+  });
+
+  test('a reference nobody issued does not resolve, and is not distinguishable from nonsense', async (t) => {
+    /*
+     * "No such record" and "that is not a reference at all" must look identical.
+     * If they did not, the difference would be worth enumerating, and an
+     * attacker guessing references would get a free signal for free.
+     */
+    const harness = await createHarness();
+    t.after(() => harness.close());
+
+    const missing = await verdictAt(harness, 'JPR-00000000');
+    const nonsense = await verdictAt(harness, 'not-a-reference-at-all');
+    assert.equal(missing.status, 'NOT_FOUND', `an unknown reference reported ${missing.status}`);
+    assert.equal(
+      missing.status,
+      nonsense.status,
+      'an unknown reference and a malformed one are distinguishable, which is a free signal to a guesser',
+    );
+    assert.equal(missing.valid, false, 'an unknown reference was reported as valid');
+  });
+});
